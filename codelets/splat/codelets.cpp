@@ -355,12 +355,15 @@ public:
     iterativeQuickSort<G>(&buffer[0], 0, end);
   }
 
-  void renderTile(const size_t numGaussians, const Bounds2f& tileBounds, unsigned workerId = 0u) {
+  void renderTile(const size_t numGaussians, const Bounds2f& tileBounds, const unsigned workerId = 0u) {
 
     sortBuffer<Gaussian2D>(gaus2D, numGaussians);
 
-    for (auto i = tileBounds.min.x; i < tileBounds.max.x; ++i) {
-      for (auto j = tileBounds.min.y; j < tileBounds.max.y; ++j) {
+    // const auto startIndex = sizeof(Gaussian3D) * workerId;
+    // for (auto i = startIndex; i < rightOut.size(); i+=sizeof(Gaussian3D) * numWorkers()) {
+
+    for (auto i = tileBounds.min.x ; i < tileBounds.max.x; ++i) {
+      for (auto j = tileBounds.min.y  + workerId ; j < tileBounds.max.y; j+=numWorkers()) {
 
         float T = 1.0f;
         glm::vec4 colour = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -369,30 +372,15 @@ public:
         for (auto gi = 0u; gi < numGaussians; ++gi) {
           Gaussian2D g = unpack<Gaussian2D>(gaus2D, gi * sizeof(Gaussian2D));
 
-          // render centre
-          // auto mean = glm::vec2(g.mean.x, g.mean.y);
-          // auto dm = distance(mean, pixf);
-          // if (dm < 2.0f) {
-          //   colour = {1.0f, 0.f, 0.f, 1.0f};
-          //   continue;
-          // } 
-          // else {
-          //   colour = {1.f / dm * 10.f, 1.f / dm * 10.f, 0.f, 1.0f};
-          //   continue;
-          // }
-
-      
           glm::vec4 gCont = {g.colour.x, g.colour.y, g.colour.z, g.colour.w};
           ivec4 con_o = g.ComputeConicOpacity();
 
-          // printf("conic opacity: %f %f %f %f\n", con_o.x, con_o.y, con_o.z, con_o.w);
           if (con_o.w == 0.0) {
             continue;
           }
           ivec2 xy = g.mean;
           ivec2 d = {xy.x - pixf.x, xy.y - pixf.y};
           float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
-          // power /= 100;
           if (power > 0.0f) {
             continue;
           }
@@ -438,7 +426,8 @@ public:
                                                          const glm::mat4& projmatrix,
                                                          const glm::mat4& viewmatrix,
                                                          const TiledFramebuffer& tfb, 
-                                                         const splat::Viewport& vp) {
+                                                         const splat::Viewport& vp,
+                                                         const unsigned workerId = 0u) {
     const auto tb = tfb.getTileBounds(tile_id[0]);
     const auto mvp = projmatrix * viewmatrix;
     glm::vec2 tanfov(tan(0.5 * fxy[0]),
@@ -499,7 +488,7 @@ public:
     }
 
     if (toRender > 0) {
-      renderTile(toRender, tb);
+      renderTile(toRender, tb, workerId);
       splatted[0] = toRender;
     }
   }
@@ -612,19 +601,13 @@ public:
      //clear all of the out buffers:
     clearOutBuffers(workerId);
 
-    if (workerId != 0) {
-      return true;
-    }
-
     // construct mapping from tile to framebuffer
     const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
     const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
-    clipSize =  15.0f;
+    clipSize =  12.0f;
 
     // Transpose because GLM storage order is column major:
     const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
-
-
     const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
 
     readInput(rightIn, direction::right, projmatrix, viewmatrix, tfb, vp);
@@ -632,7 +615,7 @@ public:
     readInput(upIn, direction::up, projmatrix, viewmatrix, tfb, vp);
     readInput(downIn, direction::down, projmatrix, viewmatrix, tfb, vp);
 
-    renderInternal(vertsIn, projmatrix, viewmatrix, tfb, vp);
+    renderInternal(vertsIn, projmatrix, viewmatrix, tfb, vp, workerId);
     
 
     return true;

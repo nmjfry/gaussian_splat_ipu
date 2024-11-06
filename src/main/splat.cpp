@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
   // (/ 1.0 (* 2.0 (sqrt pi)))
   const float SH_C0 = 0.28209479177387814f;
   
-  for (std::size_t i = 0; i < pts.size(); ++i) {
+  for (std::size_t i = 0; i < pts.size(); i++) {
     auto pt = pts[i].p;
     splat::Gaussian3D g;
     g.mean = {pt.x, pt.y, pt.z, 1.f};
@@ -226,22 +226,7 @@ int main(int argc, char** argv) {
 
   auto secondsElapsed = 0.0;
 
-  //mvp start
-  // [[-1.0, 0.0, 0.0, 0.0],
-  // [0.0,-0.09709989, -0.99527466, 0.0],
-  // [0.0, -0.99527466, 0.09709989, 0.0],
-  // [0.0, 0.0, -5.1539507, 1.0]]
-
-  auto mvpStart  = glm::mat4(1.0f);
-  mvpStart[0][0] = -1.0f;
-  mvpStart[1][1] = -0.09709989f;
-  mvpStart[1][2] = -0.99527466f;
-  mvpStart[2][1] = -0.99527466f;
-  mvpStart[2][2] = 0.09709989f;
-  mvpStart[3][2] = -5.1539507f;
-
-
-  auto dynamicView = mvpStart;
+  auto  dynamicView = modelView;  
   do {
     auto startTime = std::chrono::steady_clock::now();
     *imagePtr = 0;
@@ -259,7 +244,7 @@ int main(int argc, char** argv) {
       ipuSplatter->updateModelView(dynamicView);
       ipuSplatter->updateProjection(projection);
  
-      ipuSplatter->updateFocalLengths(state.fov, state.lambda1 / 10.f);
+      ipuSplatter->updateFocalLengths(state.fov, state.lambda1);
       gm.execute(*ipuSplatter);
       ipuSplatter->getFrameBuffer(*imagePtr);
     }
@@ -292,7 +277,12 @@ int main(int argc, char** argv) {
           ipu_utils::logger()->info("Dynamic view matrix: {} {} {} {}", modelView[i][0], modelView[i][1], modelView[i][2], modelView[i][3]);
         }
 
+        //print state
+        printf("X: %f\n", state.X);
+        printf("Y: %f\n", state.Y);
+        printf("Z: %f\n", state.Z);
 
+        
         printf("envRotationDegrees: %f\n", state.envRotationDegrees);
         printf("envRotationDegrees2: %f\n", state.envRotationDegrees2);
         printf("lambda1: %f\n", state.lambda1);
@@ -309,9 +299,11 @@ int main(int argc, char** argv) {
 // envRotationDegrees2: 184.763657
 // fov: 0.433323
 
-      dynamicView = modelView * glm::rotate(glm::mat4(1.f), glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
+      dynamicView = glm::translate(modelView, glm::vec3(0.f, 0.f , state.Z));
+      dynamicView = glm::translate(dynamicView, glm::vec3(state.X,  state.Y , 0.f));
+      dynamicView = glm::rotate(dynamicView, glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
       dynamicView = glm::rotate(dynamicView, glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
-      dynamicView = glm::translate(dynamicView, glm::vec3(state.X / 50.f,  state.Y  / 50.f, -state.Z / 20.f + 20.f));
+
 
     } else {
       // Only log these if not in interactive mode:

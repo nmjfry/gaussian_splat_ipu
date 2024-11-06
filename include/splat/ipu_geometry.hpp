@@ -3,7 +3,6 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
-
 #include </home/nf20/workspace/gaussian_splat_ipu/include/math/sincos.hpp>
 
 // #ifdef __IPU__
@@ -319,7 +318,7 @@ class Gaussian3D {
         glm::mat3 S(glm::vec3(expf(scale.x), 0.0f, 0.0f),
                     glm::vec3(0.0f, expf(scale.y), 0.0f),
                     glm::vec3(0.0f, 0.0f, expf(scale.z)));
-        return R * S * glm::transpose(S) * glm::transpose(R);
+        return  R *  S * glm::transpose(S) * glm::transpose(R);
     }
 
     static float max(float a, float b) {
@@ -331,7 +330,9 @@ class Gaussian3D {
     }
 
     ivec3 ComputeCov2D(const glm::mat4& projmatrix, const glm::mat4& viewmatrix, float tan_fovx, float tan_fovy, float focal_x, float focal_y) {
-      // const auto mvp = projmatrix * viewmatrix;
+      // t is in view coordinates
+      // float alpha = mean.w;
+      // glm::vec4 t = viewmatrix * glm::vec4(mean.x, mean.y, mean.z, 1.0f);
 
       const glm::mat4 mv = projmatrix * viewmatrix;
       glm::vec3 t = glm::vec3(mv * glm::vec4(mean.x, mean.y, mean.z, 1.0f));
@@ -347,37 +348,18 @@ class Gaussian3D {
         0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
         0, 0, 0);
 
-      glm::mat3 W = glm::mat3(mv);
-      // for (int row = 0; row < 4; ++row) {
-      //   for (int col = 0; col < 4; ++col) {
-      //       printf("%f ", mv[row][col]);
-      //   }
-      // }
-      //   printf("\n");
+      // glm::mat3 W = glm::mat3(mv);
 
-        // -1.000000 0.0      0.0       0.0 
-        //  0.0      0.999999 0.0       0.0
-        //  0.0      0.0     -0.999999  0.0
-        //  0.0      0.0     -1.636055  1.000000
-
-        //  -1.000000 0.0 0.0   0.0
-        //  0.0 0.999999 0.0    0.0 
-        //  0.0 0.0 -0.999999   -1.636055
-        //  0.0 0.0 0.0         1.000000 
-
-
-      glm::mat3 T = W * J;
+      glm::mat3 T = glm::mat3(mv) * J;
 
       glm::mat3 cov3D = ComputeCov3D();
 
-      glm::mat3 cov = glm::transpose(T) * glm::transpose(cov3D) * T;
+      glm::mat3 cov = T * cov3D * glm::transpose(T);
 
       // Apply low-pass filter: every Gaussian should be at least
       // one pixel wide/high. Discard 3rd row and column.
       cov[0][0] += 0.3f;
       cov[1][1] += 0.3f;
-
-      // printf("cov %f, %f, %f\n", float(cov[0][0]), float(cov[0][1]), float(cov[1][1]));
 
       return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
     }
