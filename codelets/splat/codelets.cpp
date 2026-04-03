@@ -172,7 +172,7 @@ public:
 
 
   unsigned toByteBufferIndex(float x, float y) {
-    return unsigned(x + y * IPU_TILEWIDTH) * 3;
+    return unsigned(x + y * IPU_TILEWIDTH) * 4;
   }
 
   static unsigned char clampToU8(float v) {
@@ -182,15 +182,24 @@ public:
     return (unsigned char)c;
   }
 
+  // Pack RGBX into a single 32-bit word to avoid byte-level
+  // race conditions between workers on the same IPU tile.
   void setPixel(float x, float y, const ivec4 &colour) {
     unsigned idx = toByteBufferIndex(x, y);
-    // Additive blend in uint8 space (framebuffer is cleared to 0 each frame)
-    unsigned r = (unsigned)localFb[idx]     + clampToU8(colour.x);
-    unsigned g = (unsigned)localFb[idx + 1] + clampToU8(colour.y);
-    unsigned b = (unsigned)localFb[idx + 2] + clampToU8(colour.z);
-    localFb[idx]     = r > 255 ? 255 : (unsigned char)r;
-    localFb[idx + 1] = g > 255 ? 255 : (unsigned char)g;
-    localFb[idx + 2] = b > 255 ? 255 : (unsigned char)b;
+    // Read existing pixel as 32-bit word
+    unsigned word;
+    memcpy(&word, &localFb[idx], 4);
+    // Unpack, add, clamp
+    unsigned char r0 = word & 0xFF;
+    unsigned char g0 = (word >> 8) & 0xFF;
+    unsigned char b0 = (word >> 16) & 0xFF;
+    unsigned r = (unsigned)r0 + clampToU8(colour.x);
+    unsigned g = (unsigned)g0 + clampToU8(colour.y);
+    unsigned b = (unsigned)b0 + clampToU8(colour.z);
+    word = (r > 255 ? 255 : r)
+         | ((g > 255 ? 255 : g) << 8)
+         | ((b > 255 ? 255 : b) << 16);
+    memcpy(&localFb[idx], &word, 4);
   }
 
   ivec2 viewspaceToTile(const ivec2& pt, ivec2 tlBound) {
@@ -231,11 +240,13 @@ public:
   }
 
   void colourFb(const ivec4 &colour, unsigned workerId) {
-    const auto startIndex = 3 * workerId;
-    for (auto i = startIndex; i < localFb.size(); i += 3 * numWorkers()) {
-      localFb[i]     = clampToU8(colour.x);
-      localFb[i + 1] = clampToU8(colour.y);
-      localFb[i + 2] = clampToU8(colour.z);
+    // Write 32-bit words (RGBX) to avoid byte-level races between workers
+    unsigned word = clampToU8(colour.x)
+                  | (clampToU8(colour.y) << 8)
+                  | (clampToU8(colour.z) << 16);
+    const auto startIndex = 4 * workerId;
+    for (auto i = startIndex; i < localFb.size(); i += 4 * numWorkers()) {
+      memcpy(&localFb[i], &word, 4);
     }
   }
 

@@ -36,7 +36,7 @@ IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
     hostVertices.push_back(v.p.z);
     hostVertices.push_back(1.f);
   }
-  frameBuffer.resize(fb.width * fb.height * 3, 0);
+  frameBuffer.resize(fb.width * fb.height * 4, 0); // RGBX: 4 bytes per pixel for 32-bit alignment
   printf("Fb size: %luB\n", frameBuffer.size());
 }
 
@@ -61,7 +61,7 @@ IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAM
     }
   }
 
-  frameBuffer.resize(fb.width * fb.height * 3, 0);
+  frameBuffer.resize(fb.width * fb.height * 4, 0); // RGBX: 4 bytes per pixel for 32-bit alignment
   printf("Fb size: %luB\n", frameBuffer.size());
 
   splatCounts.resize(fb.numTiles);
@@ -117,11 +117,11 @@ cv::Mat tileImageBuffer(cv::Mat image, int tileHeight, int tileWidth, int dataTy
 }
 
 void IpuSplatter::getFrameBuffer(cv::Mat &frame) const {
-  // Framebuffer is already uint8 RGB from the IPU, just need to
-  // rearrange tile strips and convert RGB->BGR for OpenCV.
-  cv::Mat image_rgb = cv::Mat(cv::Size(fbMapping.width, fbMapping.height), CV_8UC3, (void *) frameBuffer.data(), cv::Mat::AUTO_STEP);
-  cv::Mat tiled = tileImageBuffer(image_rgb, fbMapping.tileHeight, fbMapping.tileWidth, CV_8UC3, 3);
-  cvtColor(tiled, frame, cv::COLOR_RGB2BGR);
+  // Framebuffer is uint8 RGBX (4 bytes/pixel, X=padding) from the IPU.
+  // Rearrange tile strips, then convert RGBA->BGR (the X channel is ignored by OpenCV).
+  cv::Mat image_rgba = cv::Mat(cv::Size(fbMapping.width, fbMapping.height), CV_8UC4, (void *) frameBuffer.data(), cv::Mat::AUTO_STEP);
+  cv::Mat tiled = tileImageBuffer(image_rgba, fbMapping.tileHeight, fbMapping.tileWidth, CV_8UC4, 4);
+  cvtColor(tiled, frame, cv::COLOR_RGBA2BGR);
 }
 
 void IpuSplatter::getProjectedPoints(std::vector<glm::vec4>& pts) const {
@@ -258,7 +258,7 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   broadcastMvp.add(projection.buildWrite(vg, true));
   broadcastMvp.add(fxy.buildWrite(vg, true));
 
-  auto fbGrainSize = 3; // 3 unsigned chars per pixel (RGB)
+  auto fbGrainSize = 4; // 4 unsigned chars per pixel (RGBX, 32-bit aligned)
   auto fbToTileMapping = calculateMapping(vg, frameBuffer.size(), fbGrainSize, fbMapping);
   ipu_utils::logger()->info("Framebuffer layout: padding: {}, elementsPerTile: {}, totalTiles: {}", fbToTileMapping.padding, fbToTileMapping.elementsPerTile, fbToTileMapping.totalTiles);
   auto paddedFramebuffer = vg.addVariable(UNSIGNED_CHAR, {frameBuffer.size() + fbToTileMapping.padding}, "padded_frame_buffer");
