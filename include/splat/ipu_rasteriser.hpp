@@ -49,7 +49,7 @@ private:
   std::vector<unsigned> splatCounts;
   std::vector<float> fxyHost;
   TiledFramebuffer fbMapping;
-  std::vector<float> frameBuffer;
+  std::vector<unsigned char> frameBuffer;
   std::atomic<bool> initialised;
   const bool disableAMPVertices; 
 };

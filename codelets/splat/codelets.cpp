@@ -154,7 +154,7 @@ public:
   poplar::Output<poplar::Vector<int>> indices;
   poplar::Output<poplar::Vector<float>> gaus2D;
 
-  poplar::Output<poplar::Vector<float>> localFb;
+  poplar::Output<poplar::Vector<unsigned char>> localFb;
 
   poplar::Input<poplar::Vector<float>> rightIn;
   poplar::Output<poplar::Vector<float>> rightOut;
@@ -172,19 +172,25 @@ public:
 
 
   unsigned toByteBufferIndex(float x, float y) {
-    return unsigned(x + y * IPU_TILEWIDTH) * 4;
-  } 
+    return unsigned(x + y * IPU_TILEWIDTH) * 3;
+  }
+
+  static unsigned char clampToU8(float v) {
+    float c = v * 255.0f;
+    if (c < 0.0f) c = 0.0f;
+    if (c > 255.0f) c = 255.0f;
+    return (unsigned char)c;
+  }
 
   void setPixel(float x, float y, const ivec4 &colour) {
-    ivec4 pixel;
     unsigned idx = toByteBufferIndex(x, y);
-    memcpy(&pixel, &localFb[idx], sizeof(pixel));
-    // if (pixel.w >= 100.f) {
-    //   return;
-    // }
-
-    pixel = pixel + colour;
-    memcpy(&localFb[idx], &pixel, sizeof(pixel));
+    // Additive blend in uint8 space (framebuffer is cleared to 0 each frame)
+    unsigned r = (unsigned)localFb[idx]     + clampToU8(colour.x);
+    unsigned g = (unsigned)localFb[idx + 1] + clampToU8(colour.y);
+    unsigned b = (unsigned)localFb[idx + 2] + clampToU8(colour.z);
+    localFb[idx]     = r > 255 ? 255 : (unsigned char)r;
+    localFb[idx + 1] = g > 255 ? 255 : (unsigned char)g;
+    localFb[idx + 2] = b > 255 ? 255 : (unsigned char)b;
   }
 
   ivec2 viewspaceToTile(const ivec2& pt, ivec2 tlBound) {
@@ -225,18 +231,11 @@ public:
   }
 
   void colourFb(const ivec4 &colour, unsigned workerId) {
-    const auto startIndex = 4 * workerId;
-    for (auto i = startIndex; i < localFb.size(); i += 4 * numWorkers()) {
-      memcpy(&localFb[i], &colour, sizeof(colour));
-    }
-  }
-
-  void addBG(const ivec4 &colour) {
-    for (auto i = 0; i < localFb.size(); i += 4) {
-      ivec4 pixel;
-      memcpy(&pixel, &localFb[i], sizeof(pixel));
-      pixel = pixel + colour;
-      memcpy(&localFb[i], &pixel, sizeof(pixel));
+    const auto startIndex = 3 * workerId;
+    for (auto i = startIndex; i < localFb.size(); i += 3 * numWorkers()) {
+      localFb[i]     = clampToU8(colour.x);
+      localFb[i + 1] = clampToU8(colour.y);
+      localFb[i + 2] = clampToU8(colour.z);
     }
   }
 

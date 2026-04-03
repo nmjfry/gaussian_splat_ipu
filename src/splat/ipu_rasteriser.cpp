@@ -36,18 +36,12 @@ IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
     hostVertices.push_back(v.p.z);
     hostVertices.push_back(1.f);
   }
-  frameBuffer.reserve(fb.width * fb.height * 4);
-  for (uint i = 0; i < fb.width * fb.height; ++i) {
-    frameBuffer.push_back(0.0);
-    frameBuffer.push_back(0.0);
-    frameBuffer.push_back(0.0);
-    frameBuffer.push_back(0.0);
-  }
+  frameBuffer.resize(fb.width * fb.height * 3, 0);
   printf("Fb size: %luB\n", frameBuffer.size());
 }
 
 IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAMP)
-  : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"), 
+  : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"),
     counts("splat_counts"),
     hostModelView(16),
     hostProjection(16),
@@ -59,7 +53,7 @@ IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAM
   auto elemSize = sizeof(verts[0]);
   hostVertices.reserve(elemSize * verts.size());
   printf("num verts in: %lu, elemsize: %lu \n", verts.size(), elemSize);
-  
+
   for (auto j = 0u; j < verts.size(); ++j) {
     auto gptr = (const float*)&verts[j];
     for (auto i = 0u; i < elemSize; ++i) {
@@ -67,13 +61,7 @@ IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAM
     }
   }
 
-  frameBuffer.reserve(fb.width * fb.height * 4);
-  for (uint i = 0; i < fb.width * fb.height; ++i) {
-    for (auto j = 0u; j < 4; ++j) {
-      frameBuffer.push_back(0.0);
-    }
-  }
-
+  frameBuffer.resize(fb.width * fb.height * 3, 0);
   printf("Fb size: %luB\n", frameBuffer.size());
 
   splatCounts.resize(fb.numTiles);
@@ -129,18 +117,11 @@ cv::Mat tileImageBuffer(cv::Mat image, int tileHeight, int tileWidth, int dataTy
 }
 
 void IpuSplatter::getFrameBuffer(cv::Mat &frame) const {
-  // need to ensure that we read sections of the framebuffer
-  // as square tiles and then stitch them together
-
-  cv::Mat image_f = cv::Mat(cv::Size(fbMapping.width, fbMapping.height), CV_32FC4, (void *) frameBuffer.data(), cv::Mat::AUTO_STEP);
-  // Clamp values between 0 and 255
-
-  cv::Mat image_f_8u;
-  cv::min(image_f * 255.0f, 255.0f, image_f);
-  image_f.convertTo(image_f_8u, CV_8UC4);
-  cvtColor(image_f_8u, frame, cv::COLOR_RGBA2BGR);
-  frame = tileImageBuffer(frame, fbMapping.tileHeight, fbMapping.tileWidth, CV_8UC3, 3);
-
+  // Framebuffer is already uint8 RGB from the IPU, just need to
+  // rearrange tile strips and convert RGB->BGR for OpenCV.
+  cv::Mat image_rgb = cv::Mat(cv::Size(fbMapping.width, fbMapping.height), CV_8UC3, (void *) frameBuffer.data(), cv::Mat::AUTO_STEP);
+  cv::Mat tiled = tileImageBuffer(image_rgb, fbMapping.tileHeight, fbMapping.tileWidth, CV_8UC3, 3);
+  cvtColor(tiled, frame, cv::COLOR_RGB2BGR);
 }
 
 void IpuSplatter::getProjectedPoints(std::vector<glm::vec4>& pts) const {
@@ -277,10 +258,10 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   broadcastMvp.add(projection.buildWrite(vg, true));
   broadcastMvp.add(fxy.buildWrite(vg, true));
 
-  auto fbGrainSize = 4;
+  auto fbGrainSize = 3; // 3 unsigned chars per pixel (RGB)
   auto fbToTileMapping = calculateMapping(vg, frameBuffer.size(), fbGrainSize, fbMapping);
   ipu_utils::logger()->info("Framebuffer layout: padding: {}, elementsPerTile: {}, totalTiles: {}", fbToTileMapping.padding, fbToTileMapping.elementsPerTile, fbToTileMapping.totalTiles);
-  auto paddedFramebuffer = vg.addVariable(FLOAT, {frameBuffer.size() + fbToTileMapping.padding}, "padded_frame_buffer");
+  auto paddedFramebuffer = vg.addVariable(UNSIGNED_CHAR, {frameBuffer.size() + fbToTileMapping.padding}, "padded_frame_buffer");
   applyTileMapping(vg, paddedFramebuffer, fbToTileMapping);
   outputFramebuffer = paddedFramebuffer.slice(0, frameBuffer.size());
 
