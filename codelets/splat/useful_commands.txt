@@ -1,0 +1,2 @@
+
+popc -O3 -S --target=ipu2 codelets.cpp -o simd.S -I /home/nf20/workspace/gaussian_splat_ipu/external/glm/ -I /home/nf20/workspace/gaussian_splat_ipu/include/missing -I /home/nf20/workspace/gaussian_splat_ipu/include/tileMapping

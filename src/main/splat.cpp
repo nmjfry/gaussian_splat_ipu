@@ -1,5 +1,6 @@
 // Copyright (c) 2023 Graphcore Ltd. All rights reserved.
 
+#include "glm/matrix.hpp"
 #include <cstdlib>
 
 #include <opencv2/highgui.hpp>
@@ -167,12 +168,10 @@ int main(int argc, char** argv) {
   ipu_utils::GraphManager gm;
   gm.compileOrLoad(*ipuSplatter);
 
-  auto FOV = glm::radians(40.f);
-
   // Setup a user interface server if requested:
   std::unique_ptr<InterfaceServer> uiServer;
   InterfaceServer::State state;
-  state.fov = glm::radians(40.f);
+  
   state.device = args.at("device").as<std::string>();
   auto uiPort = args.at("ui-port").as<int>();
   if (uiPort) {
@@ -183,18 +182,20 @@ int main(int argc, char** argv) {
   }
 
   // Set up the modelling and projection transforms in an OpenGL compatible way:
-  auto modelView = splat::lookAtBoundingBox(bb, glm::vec3(0.f , 1.f, 1.f), 1.f);
+  // Scale=2: camera is 2*radius from centroid so the near face of the BB is at
+  // distance radius from the camera (not zero, which would be at the camera plane).
+  auto viewMatrix = splat::lookAtBoundingBox(bb, glm::vec3(0.f , 1.f, 0.f), 2.f);
 
   // Transform the BB to camera/eye space:
   splat::Bounds3f bbInCamera(
-    modelView * glm::vec4(bb.min, 1.f),
-    modelView * glm::vec4(bb.max, 1.f)
+    viewMatrix * glm::vec4(bb.min, 1.f),
+    viewMatrix * glm::vec4(bb.max, 1.f)
   );
 
   ipu_utils::logger()->info("Point bounds (eye space): {}", bbInCamera);
   auto projection = splat::fitFrustumToBoundingBox(bbInCamera, state.fov, aspect);
 
-  ipuSplatter->updateModelView(modelView);
+  ipuSplatter->updateModelView(viewMatrix);
   ipuSplatter->updateProjection(projection);
   gm.prepareEngine();
 
@@ -226,7 +227,7 @@ int main(int argc, char** argv) {
 
   auto secondsElapsed = 0.0;
 
-  auto  dynamicView = modelView;  
+  auto  dynamicView = viewMatrix;  
   do {
     auto startTime = std::chrono::steady_clock::now();
     *imagePtr = 0;
@@ -274,7 +275,7 @@ int main(int argc, char** argv) {
       if (secondsElapsed >= 3.f) {
         // print viewmatrix
         for (int i = 0; i < 4; i++) {
-          ipu_utils::logger()->info("Dynamic view matrix: {} {} {} {}", modelView[i][0], modelView[i][1], modelView[i][2], modelView[i][3]);
+          ipu_utils::logger()->info("Dynamic view matrix: {} {} {} {}", viewMatrix[i][0], viewMatrix[i][1], viewMatrix[i][2], viewMatrix[i][3]);
         }
 
         //print state
@@ -298,13 +299,28 @@ int main(int argc, char** argv) {
 // envRotationDegrees: 85.763603
 // envRotationDegrees2: 184.763657
 // fov: 0.433323
+      dynamicView = viewMatrix;
 
-      dynamicView = glm::translate(modelView, glm::vec3(0.f, 0.f , state.Z));
-      dynamicView = glm::translate(dynamicView, glm::vec3(state.X,  state.Y , 0.f));
-      dynamicView = glm::rotate(dynamicView, glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
-      dynamicView = glm::rotate(dynamicView, glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
+      // dynamicView[3][0] = 0.0f;  // Set T_x
+      // dynamicView[3][1] = 0.0f;  // Set T_y
+      // dynamicView[3][2] = 0.0f;  // Set T_z
 
+      // auto inv = glm::inverse(dynamicView);
+      // auto r1 = glm::rotate(glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
+      // auto r2 = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
+      
+      // inv = r1 * r2 * inv;
+      // dynamicView = glm::inverse(inv);
+      auto r1 = glm::rotate(glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
+      auto r2  = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
+      dynamicView = r1 * r2 * dynamicView;
+      // Zoom: directly offset the view matrix Tz (column 3, row 2).
+      // This moves along the camera's local Z axis regardless of rotation.
+      // Positive state.Z = camera moves forward (zoom in, Tz becomes less negative).
+      const float sceneScale = bb.diagonal().length();
+      dynamicView[3][2] += state.Z * sceneScale;
 
+      
     } else {
       // Only log these if not in interactive mode:
       ipu_utils::logger()->info("Splat time: {} points/sec: {}", splatTimeSecs, pts.size()/splatTimeSecs);

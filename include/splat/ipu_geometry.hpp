@@ -330,12 +330,9 @@ class Gaussian3D {
     }
 
     ivec3 ComputeCov2D(const glm::mat4& projmatrix, const glm::mat4& viewmatrix, float tan_fovx, float tan_fovy, float focal_x, float focal_y) {
-      // t is in view coordinates
-      // float alpha = mean.w;
-      // glm::vec4 t = viewmatrix * glm::vec4(mean.x, mean.y, mean.z, 1.0f);
-
-      const glm::mat4 mv = projmatrix * viewmatrix;
-      glm::vec3 t = glm::vec3(mv * glm::vec4(mean.x, mean.y, mean.z, 1.0f));
+      // t must be in VIEW space (viewmatrix only, not proj*view).
+      // Using proj*view here would give clip-space coords which invalidates the Jacobian.
+      glm::vec3 t = glm::vec3(viewmatrix * glm::vec4(mean.x, mean.y, mean.z, 1.0f));
       const float limx = 1.3f * tan_fovx;
       const float limy = 1.3f * tan_fovy;
       const float txtz = t.x / t.z;
@@ -348,13 +345,14 @@ class Gaussian3D {
         0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
         0, 0, 0);
 
-      // glm::mat3 W = glm::mat3(mv);
-
-      glm::mat3 T = glm::mat3(mv) * J;
+      // W is the 3x3 rotation part of the view matrix (world->camera).
+      glm::mat3 W = glm::mat3(viewmatrix);
+      glm::mat3 T = W * J;
 
       glm::mat3 cov3D = ComputeCov3D();
 
-      glm::mat3 cov = T * cov3D * glm::transpose(T);
+      // Correct EWA formula: T^T * Sigma3D * T  (matches original 3DGS paper).
+      glm::mat3 cov = glm::transpose(T) * cov3D * T;
 
       // Apply low-pass filter: every Gaussian should be at least
       // one pixel wide/high. Discard 3rd row and column.

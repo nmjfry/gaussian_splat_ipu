@@ -1,0 +1,48 @@
+hostvertices size: 17469184, numtiles 1439
+Input size of data: 17469184B
+Upper bound elements per tile: 12160.0
+Full tiles: 1436.0
+Unfilled tiles: 4.0
+Remaining elements: 7424.0
+Padded elements on last used tile: 7424.0
+Padding: 0.0
+Total padding to fill all tiles: 48640.0
+Total tiles: 1439.0
+Vertex layout: padding: 48640, elementsPerTile: 12160, totalTiles: 1439
+Size of slice on last tile: 19584
+Size of slice on last tile: 306
+Size of slice on last tile: 0
+
+
+
+hostvertices size: 3970560, numtiles 1439
+Input size of data: 3970560B
+Upper bound elements per tile: 2816.0
+Full tiles: 1410.0
+Unfilled tiles: 30.0
+Remaining elements: 0.0
+Padded elements on last used tile: 0.0
+Padding: 0.0
+Total padding to fill all tiles: 84480.0
+Total tiles: 1439.0
+Vertex layout: padding: 84480, elementsPerTile: 2816, totalTiles: 1439
+Size of slice on last tile: 2816
+Size of slice on last tile: 44
+Size of slice on last tile: 0
+
+
+
+hostvertices size: 5852800, numtiles 1439
+Input size of data: 5852800B
+Upper bound elements per tile: 4096.0
+Full tiles: 1428.0
+Unfilled tiles: 12.0
+Remaining elements: 3712.0
+Padded elements on last used tile: 3712.0
+Padding: 0.0
+Total padding to fill all tiles: 49152.0
+Total tiles: 1439.0
+Vertex layout: padding: 49152, elementsPerTile: 4096, totalTiles: 1439
+Size of slice on last tile: 7808
+Size of slice on last tile: 122
+Size of slice on last tile: 0

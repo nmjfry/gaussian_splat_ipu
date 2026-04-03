@@ -430,12 +430,13 @@ public:
                                                          const unsigned workerId = 0u) {
     const auto tb = tfb.getTileBounds(tile_id[0]);
     const auto mvp = projmatrix * viewmatrix;
-    glm::vec2 tanfov(tan(0.5 * fxy[0]),
-                      tan(0.5 * fxy[0]));
-
-      glm::vec2 focal(tfb.width / (2.f * glm::tan(fxy[0] / 2.f)),
-            tfb.height / (2.f * glm::tan(fxy[0] / 2.f)));
-
+    // fxy[0] is the half-FOV in radians (already halved by InterfaceServer).
+    // Do NOT divide by 2 again — that would give quarter-FOV.
+    glm::vec2 tanfov(glm::tan(fxy[0]), glm::tan(fxy[0]));
+    // focal.x uses height (not width) because the projection matrix produces equal
+    // pixel-space focal lengths for x and y (the projection is aspect-corrected).
+    glm::vec2 focal(tfb.height / (2.f * glm::tan(fxy[0])),
+                    tfb.height / (2.f * glm::tan(fxy[0])));
 
     auto toRender = 0u;
     for (auto i = 0; i < buffer.size(); i+=sizeof(Gaussian3D)) {
@@ -503,11 +504,10 @@ public:
     const auto tb = tfb.getTileBounds(tile_id[0]);
     const auto tbPrev = tfb.getTileBounds(tfb.getNearbyTile(tile_id[0], recievedFrom));
 
-    glm::vec2 tanfov(glm::tan(0.5 * fxy[0]),
-                    glm::tan(0.5 * fxy[0]));
-
-    glm::vec2 focal(tfb.width / (2.f * glm::tan(fxy[0] / 2.f)),
-                    tfb.height / (2.f * glm::tan(fxy[0] / 2.f)));
+    // fxy[0] is already half-FOV — no further halving.
+    glm::vec2 tanfov(glm::tan(fxy[0]), glm::tan(fxy[0]));
+    glm::vec2 focal(tfb.height / (2.f * glm::tan(fxy[0])),
+                    tfb.height / (2.f * glm::tan(fxy[0])));
 
     const auto mvp = projmatrix * viewmatrix;
 

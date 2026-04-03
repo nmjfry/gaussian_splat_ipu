@@ -1,0 +1,145 @@
+[18:39:08.929331] [I] [1279547] Total point count: 62040
+[18:39:08.929427] [I] [1279547] Point bounds (world space): vec3(-5.986889, -2.799695, -2.623879) -> vec3(2.745349, 5.595762, 2.701555)
+[18:39:08.932119] [I] [1279547] Number of pixels in framebuffer: 921600
+[18:39:08.932131] [I] [1279547] Number of tiles in framebuffer: 1440.0
+[18:39:08.932137] [I] [1279547] Number of pixels per tile: 640.0
+[18:39:08.932144] [I] [1279547] Tile index test. Pix coord 719.0, 1279.0 -> tile id: 1439.0
+[18:39:08.932150] [I] [1279547] Generating 62040 gaussians
+num verts in: 50, elemsize: 64 
+Fb size: 3686400B
+[18:39:09.072946] [I] [1279547] Poplar version: 3.3.0 (de1f8de2a7)
+[18:39:09.079563] [I] [1279547] Found 1 compatible IPU devices.
+[18:39:09.079581] [I] [1279547] Creating graph with 1 replicas
+[18:39:09.083032] [I] [1279547] Graph construction started
+[18:39:10.083533] [I] [1279547] Input size of data: 3686400B
+[18:39:10.083582] [I] [1279547] Upper bound elements per tile: 2560.0
+[18:39:10.083589] [I] [1279547] Full tiles: 1440.0
+[18:39:10.083595] [I] [1279547] Unfilled tiles: 0.0
+[18:39:10.083600] [I] [1279547] Remaining elements: 0.0
+[18:39:10.083605] [I] [1279547] Padded elements on last used tile: 0.0
+[18:39:10.083610] [I] [1279547] Padding: 0.0
+[18:39:10.083615] [I] [1279547] Total padding to fill all tiles: 0.0
+[18:39:10.083620] [I] [1279547] Total tiles: 1439.0
+[18:39:10.083626] [I] [1279547] Framebuffer layout: padding: 0, elementsPerTile: 2560, totalTiles: 1439
+[18:39:10.084829] [I] [1279547] Size of slice on last tile: 2560
+[18:39:10.084854] [I] [1279547] hostvertices size: 3200, numtiles 1439
+[18:39:10.084860] [I] [1279547] Input size of data: 3200B
+[18:39:10.084866] [I] [1279547] Upper bound elements per tile: 64.0
+[18:39:10.084872] [I] [1279547] Full tiles: 50.0
+[18:39:10.084877] [I] [1279547] Unfilled tiles: 1390.0
+[18:39:10.084882] [I] [1279547] Remaining elements: 0.0
+[18:39:10.084887] [I] [1279547] Padded elements on last used tile: 0.0
+[18:39:10.084892] [I] [1279547] Padding: 0.0
+[18:39:10.084898] [I] [1279547] Total padding to fill all tiles: 88960.0
+[18:39:10.084903] [I] [1279547] Total tiles: 1439.0
+[18:39:10.084909] [I] [1279547] Vertex layout: padding: 88960, elementsPerTile: 64, totalTiles: 1439
+[18:39:10.086143] [I] [1279547] Size of slice on last tile: 64
+[18:39:10.087353] [I] [1279547] Size of slice on last tile: 1
+[18:39:10.088518] [I] [1279547] Size of slice on last tile: 1
+[18:39:19.826973] [I] [1279547] Graph construction finished
+[18:39:19.827023] [I] [1279547] Graph compilation started
+[18:39:50.701691] [I] [1279547] Graph compilation finished
+[18:39:51.095619] [I] [1280023] User interface server listening on port 6000
+[18:39:58.115843] [I] [1280023] User interface client connected.
+PacketDemuxer::receiveLoop() entered.
+PacketMuxer::sendLoop() entered.
+New subscriber for 'env_rotation'
+New subscriber for 'detach'
+New subscriber for 'stop'
+New subscriber for 'exposure'
+New subscriber for 'gamma'
+New subscriber for 'X'
+New subscriber for 'Y'
+New subscriber for 'Z'
+New subscriber for 'lambda1'
+New subscriber for 'lambda2'
+New subscriber for 'fov'
+New subscriber for 'device'
+[18:39:58.117684] [I] [1280023] User interface server entering Tx/Rx loop.
+New subscriber for 'ready'
+Removing subscriber for 'ready'
+Output #0, m4v, to 'std::function<> callback':
+    Stream #0:0: Video: mpeg4 (FMP4 / 0x34504D46), yuv420p, 1280x720, q=2-31, 12000 kb/s, 30 tbn, 30 tbc
+[18:39:58.257417] [I] [1279547] Point bounds (eye space): vec3(4.366119, -4.197729, -3.953474) -> vec3(-4.366119, 4.197729, -9.278909)
+[18:39:58.353661] [I] [1279547] Attached to device with 1 IPUs, 1472 tiles, 6 workers. remote-buffers-supported: false
+libnuma: Warning: node argument -1 is out of range
+
+PacketMuxer::sendLoop() exited.
+terminate called after throwing an instance of 'poplar::core::host_sync_timeout_error'
+  what():  Host sync timed out
+IPUDevice: still waiting for host sync after 302 seconds
+On device 0 (1 IPU) at 2024-05-30T18:45:05.819102Z
+Device Overview:
+Replica 0, IPU 0: device 0, board serial number 0230.0063.822441, pcie physical slot DNC: 0
+
+Sync Groups for this Instance:
+GS1 has a GSP configuration supporting HSP
+  - Last wait on sync marks: starting=23 finishing=0 required=0
+GS2 has a GSP configuration supporting HSP
+  - Last wait on sync marks: starting=1 finishing=1 required=0
+
+Tile Overview:
+       0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15 
+  0 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  1 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  2 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  3 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  4 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  5 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  6 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  7 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  8 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+  9 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+ 10 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+ 11 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+ 12 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+ 13 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+ 14 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+ 15 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx x:x: 
+ 16 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 
+ 17 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 
+ 18 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 
+ 19 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 
+ 20 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 
+ 21 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 
+ 22 xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 
+
+  X     (non debug) exception
+  x     debug exception (trap)
+  r     waiting on sync (receiving data)
+  :     waiting on multiple syncs (sans instruction)
+  '     waiting on local sync (workers in tile)
+  .     waiting on internal sync (other tiles within IPU)
+  AB    waiting on external sync including host (A=GSP1, B=GSP2)
+  abcd  waiting on external sync excluding host (a=GSP1, b=GSP2, ...)
+  *     executing (some other instruction)
+  -     tile unloaded
+  ?     inaccessible / unknown
+
+Interesting tiles:
+Backtrace of IPU 0 tile 0 with status x:
+#0  0x4c958  Unknown
+#1  0x4c0e0  OnTileExecute+4 (Id: 121) from Execute
+#2  0x4c0e0  Sequence+64 (Id: 111) from Sequence
+#3  0x4c0e0  OnEveryTileSwitch+92 (Id: 110)
+#4  0x4c0e0  Sequence+108 (Id: 103)
+Backtrace of IPU 0 tile 1 with status x:
+#0  0x4c918  Unknown
+#1  0x4c0d0  OnTileExecute+4 (Id: 121) from Execute
+#2  0x4c0d0  Sequence+52 (Id: 111) from Sequence
+#3  0x4c0d0  OnEveryTileSwitch+80 (Id: 110)
+#4  0x4c0d0  Sequence+92 (Id: 103)
+Backtrace of IPU 0 tile 2 with status x:
+#0  0x4c918  Unknown
+#1  0x4c0d0  OnTileExecute+4 (Id: 121) from Execute
+#2  0x4c0d0  Sequence+52 (Id: 111) from Sequence
+#3  0x4c0d0  OnEveryTileSwitch+80 (Id: 110)
+#4  0x4c0d0  Sequence+92 (Id: 103)
+Backtrace of IPU 0 tile 3 with status x:
+#0  0x4c918  Unknown
+#1  0x4c0d0  OnTileExecute+4 (Id: 121) from Execute
+#2  0x4c0d0  Sequence+52 (Id: 111) from Sequence
+#3  0x4c0d0  OnEveryTileSwitch+80 (Id: 110)
+#4  0x4c0d0  Sequence+92 (Id: 103)
+
+Use the target.hostSyncTimeout engine option to change the timeout.

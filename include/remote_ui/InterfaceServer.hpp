@@ -190,7 +190,7 @@ class InterfaceServer {
                                       [&](const ComPacket::ConstSharedPacket& packet) {
                                         deserialise(packet, state.fov);
                                         // To radians:
-                                        state.fov = state.fov * (M_PI / 180.f);
+                                        state.fov = state.fov * (M_PI / 180.f) / 2;
                                         ipu_utils::logger()->trace("FOV new value: {}", state.fov);
                                         stateUpdated = true;
                                       });
@@ -232,12 +232,12 @@ public:
     float envRotationDegrees2 = 0.f;
     float exposure = 0.f;
     float gamma = 2.2f;
-    float X = 640.f;
-    float Y = 360.f;
-    float Z = 1.f;
+    float X = 0.f;   // world-space camera translation (was 640 — pixel value, wrong)
+    float Y = 0.f;   // world-space camera translation (was 360 — pixel value, wrong)
+    float Z = 0.f;   // world-space camera translation (was 1, breaks initial camera)
     float lambda1 = 1.f;
     float lambda2 = 1.f;
-    float fov = 90.f;
+    float fov = 1.57f;
     std::string device = "cpu";
     bool stop = false;
     bool detach = false;
