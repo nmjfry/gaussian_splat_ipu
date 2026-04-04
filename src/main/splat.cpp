@@ -315,11 +315,14 @@ int main(int argc, char** argv) {
       auto r1 = glm::rotate(glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
       auto r2  = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
       dynamicView = r1 * r2 * dynamicView;
-      // Zoom: directly offset the view matrix Tz (column 3, row 2).
-      // This moves along the camera's local Z axis regardless of rotation.
-      // Positive state.Z = camera moves forward (zoom in, Tz becomes less negative).
-      const float sceneScale = bb.diagonal().length();
-      dynamicView[3][2] += state.Z * sceneScale;
+      // Zoom: translate along the camera's local Z axis.
+      // state.Z=0 means no change; negative = closer, positive = farther.
+      // We apply the offset AFTER rotation so it's in camera space (row 2 of the
+      // view matrix = camera's forward direction). The translation column (col 3)
+      // in the view matrix encodes -dot(axis, eye), so adding to [3][2] moves
+      // the camera along its local Z.
+      const float initialDist = glm::length(bb.diagonal());
+      dynamicView[3][2] += state.Z * initialDist * 0.002f;
 
       
     } else {
