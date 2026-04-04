@@ -260,17 +260,10 @@ struct Gaussian2D {
   }
 
   Bounds2f GetBoundingBox() const {
+    // Bounding-radius method from the original 3DGS: 3 standard deviations
+    // of the larger eigenvalue as the box radius.
     auto [e1, e2, theta] = ComputeEigenvalues();
-    float c, s;
-    sincos(theta, s, c);
-    auto dd = (e1 / 2) * (e1 / 2);
-    auto DD = (e2 / 2) * (e2 / 2);
-    auto dxMax = glm::sqrt(dd * (c * c) + DD * (s * s));
-    auto dyMax = glm::sqrt(dd * (s * s) + DD * (c * c));
-
     float my_radius = ceil(3.f * sqrt(max(e1, e2)));
-    // return Bounds2f({mean.x - dxMax, mean.y - dyMax}, {mean.x + dxMax, mean.y + dyMax});
-
     return Bounds2f({mean.x - my_radius, mean.y - my_radius}, {mean.x + my_radius, mean.y + my_radius});
   }
 
@@ -309,16 +302,28 @@ class Gaussian3D {
     ivec3 scale;
     float gid;
 
-    // convert from (scale, rot) into the gaussian covariance matrix in world space
-    // See 3d Gaussian Splat paper for more info
+    // Convert from (scale, rot) into the gaussian covariance matrix in world space.
+    // Matches original 3DGS (forward.cu): M = S * R, Sigma = M^T * M
     glm::mat3 ComputeCov3D() const
     {
-        glm::quat q(rot.x, rot.y, rot.z, rot.w);
-        glm::mat3 R(glm::normalize(q));
-        glm::mat3 S(glm::vec3(expf(scale.x), 0.0f, 0.0f),
-                    glm::vec3(0.0f, expf(scale.y), 0.0f),
-                    glm::vec3(0.0f, 0.0f, expf(scale.z)));
-        return  R *  S * glm::transpose(S) * glm::transpose(R);
+        // Quaternion: rot = (w, x, y, z) per 3DGS .ply convention
+        float r = rot.x, x = rot.y, y = rot.z, z = rot.w;
+
+        // Build rotation matrix exactly as the original CUDA code does
+        // (GLM column-major: each argument triple is a column)
+        glm::mat3 R = glm::mat3(
+            1.f - 2.f*(y*y + z*z), 2.f*(x*y - r*z),       2.f*(x*z + r*y),
+            2.f*(x*y + r*z),       1.f - 2.f*(x*x + z*z),  2.f*(y*z - r*x),
+            2.f*(x*z - r*y),       2.f*(y*z + r*x),         1.f - 2.f*(x*x + y*y)
+        );
+
+        glm::mat3 S(1.0f);
+        S[0][0] = expf(scale.x);
+        S[1][1] = expf(scale.y);
+        S[2][2] = expf(scale.z);
+
+        glm::mat3 M = S * R;
+        return glm::transpose(M) * M;
     }
 
     static float max(float a, float b) {
@@ -345,14 +350,17 @@ class Gaussian3D {
         0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
         0, 0, 0);
 
-      // W is the 3x3 rotation part of the view matrix (world->camera).
-      glm::mat3 W = glm::mat3(viewmatrix);
+      // W extraction must match the original CUDA code which reads from
+      // a row-major float[16]. In GLM's column-major layout this is
+      // equivalent to transposing the upper-left 3x3:
+      glm::mat3 W = glm::transpose(glm::mat3(viewmatrix));
       glm::mat3 T = W * J;
 
       glm::mat3 cov3D = ComputeCov3D();
 
-      // Correct EWA formula: T^T * Sigma3D * T  (matches original 3DGS paper).
-      glm::mat3 cov = glm::transpose(T) * cov3D * T;
+      // Original 3DGS: cov = T^T * transpose(Vrk) * T
+      // Vrk is symmetric so transpose(Vrk) == Vrk.
+      glm::mat3 cov = glm::transpose(T) * glm::transpose(cov3D) * T;
 
       // Apply low-pass filter: every Gaussian should be at least
       // one pixel wide/high. Discard 3rd row and column.

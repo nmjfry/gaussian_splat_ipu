@@ -146,7 +146,8 @@ int main(int argc, char** argv) {
                       SH_C0 * ply.f_dc[2].values[i]};
       colour += 0.5f;
       colour = glm::max(colour, glm::vec3(0.f));
-      g.colour = {colour.x, colour.y, colour.z, ply.opacity.values[i]};
+      float sigmoid_opacity = 1.0f / (1.0f + expf(-ply.opacity.values[i]));
+      g.colour = {colour.x, colour.y, colour.z, sigmoid_opacity};
       g.scale = {ply.scale[0].values[i], ply.scale[1].values[i], ply.scale[2].values[i]};
       // g.scale = {-5.f, -5.f, -5.f};
       g.rot = {ply.rot[0].values[i], ply.rot[1].values[i], ply.rot[2].values[i], ply.rot[3].values[i]};
