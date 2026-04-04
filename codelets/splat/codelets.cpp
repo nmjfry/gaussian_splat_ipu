@@ -440,13 +440,14 @@ public:
                                                          const unsigned workerId = 0u) {
     const auto tb = tfb.getTileBounds(tile_id[0]);
     const auto mvp = projmatrix * viewmatrix;
-    // fxy[0] is the half-FOV in radians (already halved by InterfaceServer).
-    // Do NOT divide by 2 again — that would give quarter-FOV.
-    glm::vec2 tanfov(glm::tan(fxy[0]), glm::tan(fxy[0]));
-    // focal.x uses height (not width) because the projection matrix produces equal
-    // pixel-space focal lengths for x and y (the projection is aspect-corrected).
-    glm::vec2 focal(tfb.height / (2.f * glm::tan(fxy[0])),
-                    tfb.height / (2.f * glm::tan(fxy[0])));
+    // fxy[0] = half-FOV-Y in radians (halved by InterfaceServer).
+    // Compute separate tan_fov and focal for x and y (matches original 3DGS).
+    float tan_fovy = glm::tan(fxy[0]);
+    float tan_fovx = tan_fovy * (tfb.width / tfb.height); // aspect ratio
+    glm::vec2 tanfov(tan_fovx, tan_fovy);
+    float focal_y = tfb.height / (2.f * tan_fovy);
+    float focal_x = tfb.width  / (2.f * tan_fovx);
+    glm::vec2 focal(focal_x, focal_y);
 
     auto toRender = 0u;
     for (auto i = 0; i < buffer.size(); i+=sizeof(Gaussian3D)) {
@@ -460,7 +461,7 @@ public:
       auto clipSpace = mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, g.mean.w);
       auto projMean = vp.clipSpaceToViewport(clipSpace);
 
-      g.scale = g.scale / fxy[1];
+      // Scale used as-is (matching original 3DGS — no lambda division)
       // render and clip, send to the halo region around the current tile
       ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tanfov.x, tanfov.y, focal.x, focal.y);
       Gaussian2D g2D({projMean.x, projMean.y}, g.colour, cov2D, clipSpace.z);
@@ -514,10 +515,13 @@ public:
     const auto tb = tfb.getTileBounds(tile_id[0]);
     const auto tbPrev = tfb.getTileBounds(tfb.getNearbyTile(tile_id[0], recievedFrom));
 
-    // fxy[0] is already half-FOV — no further halving.
-    glm::vec2 tanfov(glm::tan(fxy[0]), glm::tan(fxy[0]));
-    glm::vec2 focal(tfb.height / (2.f * glm::tan(fxy[0])),
-                    tfb.height / (2.f * glm::tan(fxy[0])));
+    // Compute separate tan_fov and focal for x and y (matches original 3DGS).
+    float tan_fovy = glm::tan(fxy[0]);
+    float tan_fovx = tan_fovy * (tfb.width / tfb.height);
+    glm::vec2 tanfov(tan_fovx, tan_fovy);
+    float focal_y = tfb.height / (2.f * tan_fovy);
+    float focal_x = tfb.width  / (2.f * tan_fovx);
+    glm::vec2 focal(focal_x, focal_y);
 
     const auto mvp = projmatrix * viewmatrix;
 
@@ -544,7 +548,7 @@ public:
         continue;
       } 
 
-      g.scale = g.scale / fxy[1];
+      // Scale used as-is (matching original 3DGS — no lambda division)
 
       ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tanfov.x, tanfov.y, focal.x, focal.y);
       Gaussian2D g2D({projMean.x, projMean.y}, g.colour, cov2D, clipSpace.z);

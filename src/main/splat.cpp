@@ -90,12 +90,11 @@ int main(int argc, char** argv) {
   ipu_utils::logger()->info("Total point count: {}", pts.size());
   ipu_utils::logger()->info("Point bounds (world space): {}", bb);
 
-  // Translate all points so the centroid is zero then negate the z-axis:
+  // Translate all points so the centroid is at the origin:
   {
     const auto bbCentre = bb.centroid();
     for (auto& v : pts) {
       v.p -= bbCentre;
-      v.p.z = -v.p.z;
     }
     bb = splat::Bounds3f(pts);
   }
