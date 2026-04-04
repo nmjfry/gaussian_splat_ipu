@@ -10,7 +10,7 @@ namespace splat {
 glm::mat4 lookAtBoundingBox(const Bounds3f& bb, const glm::vec3& up, float scale) {
   auto lookAtPoint = bb.centroid();
   auto radius = glm::length(bb.diagonal()) * .5f;
-  auto cameraPosition = lookAtPoint + glm::vec3(0.f, 0.f, scale * radius);
+  auto cameraPosition = lookAtPoint - glm::vec3(0.f, 0.f, scale * radius);
   return glm::lookAt(cameraPosition, lookAtPoint, up);
 }
 
