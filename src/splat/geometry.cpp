@@ -15,10 +15,10 @@ glm::mat4x4 fitFrustumToBoundingBox(const Bounds3f& bb, float fovRadians, float 
 
   // Build projection matrix matching the original 3DGS convention:
   // Uses z_sign = +1.0 (NOT standard OpenGL which uses -1).
-  float fovY = fovRadians;
-  float fovX = 2.f * atanf(tanf(fovY / 2.f) * aspectRatio);
-  float tanHalfFovY = tanf(fovY / 2.f);
-  float tanHalfFovX = tanf(fovX / 2.f);
+  // NOTE: fovRadians arrives as HALF-FOV (already halved by InterfaceServer).
+  float halfFovY = fovRadians;
+  float tanHalfFovY = tanf(halfFovY);
+  float tanHalfFovX = tanHalfFovY * aspectRatio;
 
   float top    =  tanHalfFovY * nearPlane;
   float bottom = -top;
