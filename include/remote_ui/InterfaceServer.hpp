@@ -237,7 +237,7 @@ public:
     float Z = 0.f;   // world-space camera translation (was 1, breaks initial camera)
     float lambda1 = 1.f;
     float lambda2 = 1.f;
-    float fov = 1.57f;
+    float fov = 0.524f;  // half-FOV in radians (~30 deg half = 60 deg full)
     std::string device = "cpu";
     bool stop = false;
     bool detach = false;
