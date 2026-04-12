@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
   for (std::size_t i = 0; i < pts.size(); i++) {
     auto pt = pts[i].p;
     splat::Gaussian3D g;
-    g.mean = {pt.x, pt.y, pt.z, 1.f};
+    g.mean = {pt.x, pt.y, pt.z};
     if (ply.f_dc[0].values.size() > 0) {
       glm::vec3 colour = {SH_C0 * ply.f_dc[0].values[i],
                       SH_C0 * ply.f_dc[1].values[i],

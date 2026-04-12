@@ -194,39 +194,6 @@ void applyTileMapping(poplar::Graph& g, const poplar::Tensor& paddedInput, const
   }
 }
 
-// Add a vertex to project vertices that uses vanilla C++ code.
-void addProjectionVertex(poplar::Graph& g, poplar::ComputeSet& cs, unsigned t, const poplar::Tensor& tid,  const poplar::Tensor& westIn, const poplar::Tensor& eastOut,
-                         const poplar::Tensor& modelViewProjection, const poplar::Tensor& ptsIn, const poplar::Tensor& localFb) {
-  auto v = g.addVertex(cs, "GSplat");
-  g.setTileMapping(v, t);
-
-  g.connect(v["matrix"], modelViewProjection);
-  g.connect(v["vertsIn"], ptsIn);
-  g.connect(v["localFb"], localFb);
-  g.connect(v["tile_id"], tid);
-  g.connect(v["westIn"], westIn);
-  g.connect(v["eastOut"], eastOut);
-
-}
-
-// Add a vertex to project vertices that uses is optimised using the tile's AMP engine.
-void addProjectionVertexAMP(poplar::Graph& g, poplar::ComputeSet& cs, unsigned t,
-                        const poplar::Tensor& modelViewProjection, const poplar::Tensor& sliceIn, const poplar::Tensor& sliceOut) {
-  auto v = g.addVertex(cs, "Transform4x4_amp");
-  auto vs = g.addVertex(cs, "LoadMatrix");
-  g.setTileMapping(v, t);
-  g.setTileMapping(vs, t);
-
-  g.connect(vs["matrix"], modelViewProjection);
-  g.connect(v["vertsIn"], sliceIn);
-  g.connect(v["vertsOut"], sliceOut);
-
-  const auto vertsThisTile = sliceIn.numElements() / 4;
-  if (vertsThisTile % 8 != 0) {
-    ipu_utils::logger()->error("Tile {} has {} vertices which is not a multiple of 8", t, vertsThisTile);
-    throw std::runtime_error("Vertices per tile must be a multiple of 8 to use the AMP.");
-  }
-}
 
 void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   auto vg = graph.createVirtualGraph(0u, fbMapping.numTiles);

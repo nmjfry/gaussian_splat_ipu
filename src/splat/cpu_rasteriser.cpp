@@ -34,7 +34,7 @@ std::uint32_t splatPoints(cv::Mat& image,
 
     Gaussian3D g;
     auto p = pts[i].p;
-    g.mean = {p.x, p.y, p.z, 1.f};
+    g.mean = {p.x, p.y, p.z};
     g.scale = {1.f, 1.f, 1.f};
 
     // auto cov3D = g.ComputeCov3D();

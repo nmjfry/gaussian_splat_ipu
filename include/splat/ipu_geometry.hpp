@@ -229,77 +229,53 @@ struct square : Primitive {
 };
 
 struct Gaussian2D {
-  ivec4 colour; // RGBA colour space
-  ivec3 cov2D;
-  ivec2 mean; // in screen space 
+  ivec4 colour;  // RGB + opacity in .w
+  ivec3 conic;   // precomputed inverse of 2D covariance
+  ivec2 mean;    // screen space
   float z;
 
-  Gaussian2D(ivec2 _mean, ivec4 _colour, ivec3 _cov2D, float z) : mean(_mean), colour(_colour), cov2D(_cov2D), z(z) {}
-
   Gaussian2D() {}
+
+  // Construct from 2D covariance — compute conic once here so the pixel loop
+  // doesn't have to re-invert a 2x2 for every pixel × every Gaussian.
+  Gaussian2D(ivec2 _mean, ivec4 _colour, ivec3 _cov2D, float _z)
+    : colour(_colour), mean(_mean), z(_z) {
+    float det = _cov2D.x * _cov2D.z - _cov2D.y * _cov2D.y;
+    if (det == 0.0f) {
+      conic = {0.f, 0.f, 0.f};
+    } else {
+      float det_inv = 1.f / det;
+      conic = { _cov2D.z * det_inv, -_cov2D.y * det_inv, _cov2D.x * det_inv };
+    }
+  }
 
   static float max(float a, float b) {
     return a > b ? a : b;
   }
 
-  // computes the eigenvalues and rotation from the 2D covariance matrix
-  ivec3 ComputeEigenvalues() const {
+  // Bounding-radius method from the original 3DGS: 3 standard deviations of the
+  // larger eigenvalue. Static so it can be computed before constructing Gaussian2D
+  // (since we only store the conic now, not the covariance).
+  static Bounds2f BoundingBoxFromCov(const ivec2& mean, const ivec3& cov2D) {
     float det = cov2D.x * cov2D.z - cov2D.y * cov2D.y;
     float mid = .5f * (cov2D.x + cov2D.z);
     float lambda1 = mid + glm::sqrt(max(0.1f, mid * mid - det));
     float lambda2 = mid - glm::sqrt(max(0.1f, mid * mid - det));
-    float theta;
-    if (cov2D.y == 0 && cov2D.x >= cov2D.z) {
-      theta = 0;
-    } else if (cov2D.y == 0 && cov2D.x < cov2D.z) {
-      theta = glm::pi<float>() / 2.f;
-    } else {
-      theta = glm::atan(lambda1 - cov2D.x, cov2D.y);
-    }
-    return {lambda1, lambda2, theta};
+    float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+    return Bounds2f({mean.x - my_radius, mean.y - my_radius},
+                    {mean.x + my_radius, mean.y + my_radius});
   }
-
-  Bounds2f GetBoundingBox() const {
-    // Bounding-radius method from the original 3DGS: 3 standard deviations
-    // of the larger eigenvalue as the box radius.
-    auto [e1, e2, theta] = ComputeEigenvalues();
-    float my_radius = ceil(3.f * sqrt(max(e1, e2)));
-    return Bounds2f({mean.x - my_radius, mean.y - my_radius}, {mean.x + my_radius, mean.y + my_radius});
-  }
-
-  ivec4 ComputeConicOpacity() const {
-    // Invert covariance (EWA algorithm)
-    float det = (cov2D.x * cov2D.z - cov2D.y * cov2D.y);
-    if (det == 0.0f)
-      return {0.f, 0.f, 0.f, 0.f};
-    float det_inv = 1.f / det;
-    ivec4 conic = { cov2D.z * det_inv, -cov2D.y * det_inv, cov2D.x * det_inv, colour.w };
-    return conic;
-  }
-
-  // Pixel test to see if a pixel is inside the gaussian
-  bool inside(float x, float y) const {
-    auto es = ComputeEigenvalues();
-    auto theta = es.z;
-    float c, s;
-    sincos(theta, s, c);
-    auto e1 = es.x;
-    auto e2 = es.y;
-    auto dd = (e1 / 2) * (e1 / 2);
-    auto DD = (e2 / 2) * (e2 / 2);
-    auto a = c * (x - mean.x) + s * (y - mean.y);
-    auto b = s * (x - mean.x) - c * (y - mean.y);
-    return (((a * a) / dd)  + ((b * b) / DD)) <= 1;
-  }
-
 };
 
 class Gaussian3D {
   public:
-    ivec4 mean; // in world space
-    ivec4 colour; // RGBA colour space
-    ivec4 rot;  // local rotation of gaussian (real, i, j, k)
-    ivec3 scale;
+    // Packed layout: 60 bytes total (was 64 — dropped mean.w which was always 1.0).
+    // gid must remain the last element: insert()/evict() helpers locate it by
+    // offset (sizeof(g) - sizeof(float)).
+    ivec3 mean;   // world space, w was always 1.0
+    ivec4 colour; // RGB + opacity
+    ivec4 rot;    // quaternion (real, i, j, k)
+    ivec3 scale;  // log-space per-axis
     float gid;
 
     // Convert from (scale, rot) into the gaussian covariance matrix in world space.

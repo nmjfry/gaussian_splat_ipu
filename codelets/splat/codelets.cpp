@@ -18,18 +18,6 @@ using namespace splat;
 #include <ipu_builtins.h>
 #endif
 
-ivec4 getTileColour(unsigned tid) {
-  ivec4 c;
-  if (tid % 3 == 0) {
-    c = {.1f, 0.0f, 0.0f, 0.0f};
-  } else if (tid % 3 == 1) {
-    c = {0.0f, .1f, 0.0f, 0.0f};
-  } else {
-    c = {0.0f, 0.0f, .1f, 0.0f};
-  }
-  return c;
-}
-
 template <typename G, typename Vec> bool insertAt(Vec &buffer, unsigned idx, const G& g) {
     if (idx + sizeof(g) > buffer.size()) {
       return false;
@@ -70,75 +58,6 @@ template<typename G, typename Vec> void evict(Vec &buffer, unsigned idx) {
   g.gid = 0.f;
   insertAt(buffer, idx, g);
 }
-
-class CullGaussians : public poplar::MultiVertex {
-public:
-
-  poplar::Input<poplar::Vector<float>> vertsIn;
-  poplar::Output<poplar::Vector<unsigned>> depths;
-
-  poplar::Input<poplar::Vector<float>> modelView;
-  poplar::Input<poplar::Vector<float>> projection;
-
-  poplar::Input<poplar::Vector<int>> tile_id;
-
-  void cullInternal(const glm::mat4& viewmatrix, const TiledFramebuffer& tfb, const splat::Viewport& vp) {
-    // float max = -1.0f;
-    for (auto i = 0; i < vertsIn.size(); i+=sizeof(Gaussian3D)) {
-      auto idx = i / sizeof(Gaussian3D);
-      Gaussian3D g = unpack<Gaussian3D>(vertsIn, i);
-      depths[idx] <<= 16;
-
-      if (g.gid <= 0) {
-        continue;
-      }
-
-      glm::vec4 glmMean = {g.mean.x, g.mean.y, g.mean.z, g.mean.w};
-      auto clipSpace = viewmatrix * glmMean;
-
-      // perform near plane frustum culling
-      if (clipSpace.z > 0.f) {
-        continue;
-      }
-
-      // write the depth value to the lower bits of tid float value
-      // auto z = half(-clipSpace.z);
-      // unsigned key;
-      // memcpy(&key, &z, sizeof(z));
-      // key >>= 16;
-      // key |= depths[idx];
-
-      auto z = -clipSpace.z;
-      depths[idx] |= *(unsigned*)&z;
-      // depths[idx] = key;
-    }
-  }
-
-  bool compute(unsigned workerId) {
-
-    // construct mapping from tile to framebuffer
-    const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
-    const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
-    // Transpose because GLM storage order is column major:
-    const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
-    const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
-    const auto mvp = projmatrix * viewmatrix;
-    cullInternal(mvp, tfb, vp);
-
-    return true;
-  }
-
-};
-
-// Multi-Vertex to transform every 4x1 vector
-// in an array by the same 4x4 transformation matrix.
-// Uses the OpenGL Math (GLM) library for demonstration
-// purposes (we do not expect this to be fast as GLM is
-// not optimised for IPU yet).
-//
-// This is here as a reference to show what the
-// accumulating matrix product (AMP) engine assembly
-// vertices below are doing.
 
 class GSplat : public poplar::MultiVertex {
 
@@ -321,7 +240,9 @@ public:
     for (int j = low; j <= high - sizeof(G); j+=sizeof(G)) {
         G gm;
         std::memcpy(&gm, &elements[j], sizeof(G));
-        if (gm.z <= pivotG.z) {
+        // Front-to-back: in OpenGL view space, closest = largest (least negative) z.
+        // Sort descending so front Gaussians composite first.
+        if (gm.z >= pivotG.z) {
             i+=sizeof(G);
             swap<G>(&elements[i], &elements[j]);
         }
@@ -383,19 +304,20 @@ public:
           Gaussian2D g = unpack<Gaussian2D>(gaus2D, gi * sizeof(Gaussian2D));
 
           glm::vec4 gCont = {g.colour.x, g.colour.y, g.colour.z, g.colour.w};
-          ivec4 con_o = g.ComputeConicOpacity();
+          // Conic is precomputed once at projection time — no per-pixel invert.
+          const ivec3 conic = g.conic;
+          const float opacity = g.colour.w;
 
-          if (con_o.w == 0.0) {
+          if (opacity == 0.0f) {
             continue;
           }
-          ivec2 xy = g.mean;
-          ivec2 d = {xy.x - pixf.x, xy.y - pixf.y};
-          float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+          ivec2 d = {g.mean.x - pixf.x, g.mean.y - pixf.y};
+          float power = -0.5f * (conic.x * d.x * d.x + conic.z * d.y * d.y) - conic.y * d.x * d.y;
           if (power > 0.0f) {
             continue;
           }
 
-          float alpha = glm::min(0.99f, con_o.w * exp(power));
+          float alpha = glm::min(0.99f, opacity * exp(power));
           if (alpha < 1.0f / 255.0f) {
             continue;
           }
@@ -416,20 +338,6 @@ public:
         setPixel(pxTs.x, pxTs.y, pixel);
       }
     }
-  }
-
-  unsigned rasterise(const Gaussian2D &g, const Bounds2f& bb, const Bounds2f& tb) {
-    auto count = 0u;
-    auto centre = glm::vec2(g.mean.x, g.mean.y);
-    for (auto i = bb.min.x; i < bb.max.x; i++) {
-      for (auto j = bb.min.y; j < bb.max.y; j++) {
-        auto px = viewspaceToTile({i, j}, tb.min);
-        if(g.inside(i,j)) {
-          setPixel(px.x, px.y, g.colour);
-        } 
-      }
-    }
-    return count;
   }
 
   template<typename InternalStorage> void renderInternal(InternalStorage& buffer,
@@ -458,14 +366,15 @@ public:
         continue;
       }
 
-      auto clipSpace = mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, g.mean.w);
+      auto clipSpace = mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, 1.0f);
       auto projMean = vp.clipSpaceToViewport(clipSpace);
 
       // Scale used as-is (matching original 3DGS — no lambda division)
       // render and clip, send to the halo region around the current tile
       ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tanfov.x, tanfov.y, focal.x, focal.y);
-      Gaussian2D g2D({projMean.x, projMean.y}, g.colour, cov2D, clipSpace.z);
-      auto bb = g2D.GetBoundingBox();
+      ivec2 projMean2D = {projMean.x, projMean.y};
+      auto bb = Gaussian2D::BoundingBoxFromCov(projMean2D, cov2D);
+      Gaussian2D g2D(projMean2D, g.colour, cov2D, clipSpace.z);
       g.scale = scale;
 
       bool withinGuardBand = bb.diagonal().length() < tb.diagonal().length() * clipSize;
@@ -495,7 +404,6 @@ public:
         auto g2Idx = toRender * sizeof(Gaussian2D);
         insertAt(gaus2D, g2Idx, g2D);
         toRender++;
-        // rasterise(g2D, bb, tb);
       }
     }
 
@@ -537,7 +445,7 @@ public:
       }
 
       // project the 3D gaussian into 2D using EWA splatting algorithm
-      glm::vec4 glmMean = {g.mean.x, g.mean.y, g.mean.z, g.mean.w};
+      glm::vec4 glmMean = {g.mean.x, g.mean.y, g.mean.z, 1.0f};
       auto clipSpace = mvp * glmMean;
       auto projMean = vp.clipSpaceToViewport(clipSpace);
    
@@ -551,7 +459,8 @@ public:
       // Scale used as-is (matching original 3DGS — no lambda division)
 
       ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tanfov.x, tanfov.y, focal.x, focal.y);
-      Gaussian2D g2D({projMean.x, projMean.y}, g.colour, cov2D, clipSpace.z);
+      ivec2 projMean2D = {projMean.x, projMean.y};
+      Gaussian2D g2D(projMean2D, g.colour, cov2D, clipSpace.z);
       g.scale = scale;
 
       auto dstTile = tfb.pixCoordToTile(g2D.mean.y, g2D.mean.x);
@@ -576,7 +485,7 @@ public:
 
       // the gaussian is being propagated away from the anchor,
       // we need to render and pass it on until the extent is fully rendered.
-      auto bb = g2D.GetBoundingBox();
+      auto bb = Gaussian2D::BoundingBoxFromCov(projMean2D, cov2D);
 
       if (bb.diagonal().length() < tb.diagonal().length() * clipSize) {
         directions sendTo;
@@ -607,9 +516,8 @@ public:
 
   bool compute(unsigned workerId) {
 
-    // zero the framebuffer 
+    // zero the framebuffer
     auto black = ivec4{0.0f, 0.0f, 0.0f, 0.0f};
-    // getTileColour(tile_id[0])
     colourFb(black, workerId);
 
      //clear all of the out buffers:

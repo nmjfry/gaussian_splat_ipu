@@ -103,11 +103,11 @@ class GaussianTests : public poplar::Vertex {
 
     splat::Gaussian3D g;
     g.colour = {.4f, 0.f, 0.f, 0.9f};
-    g.mean = {0.f, 0.f, 0.f, 1.f};
+    g.mean = {0.f, 0.f, 0.f};
     g.gid = 9;
     g.scale = {1.0f, 1.0f, 1.0f};
 
-    splat::Gaussian2D g2D({640.f, 360.f}, g.colour, {4.f, 0.5f, 4.f});
+    splat::Gaussian2D g2D({640.f, 360.f}, g.colour, {4.f, 0.5f, 4.f}, 0.f);
 
     const auto tb = tfb.getTileBounds(0);
     const auto tb2 = tfb.getTileBounds(40);
