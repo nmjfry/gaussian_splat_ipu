@@ -284,9 +284,13 @@ int main(int argc, char** argv) {
       projection = splat::fitFrustumToBoundingBox(bbInCamera, state.fov, aspect);
       // Update modelview:
       if (secondsElapsed >= 3.f) {
-        // print viewmatrix
+        // Print the current dynamicView — this is what the IPU actually renders
+        // with and what a reference GPU renderer needs to match the frame.
+        // GLM is column-major: dynamicView[i] is the i-th column, so each line
+        // logs one column. Feed these 16 numbers to the GPU script as
+        //   --view-matrix "<col0.x col0.y col0.z col0.w   col1... col2... col3...>"
         for (int i = 0; i < 4; i++) {
-          ipu_utils::logger()->info("Dynamic view matrix: {} {} {} {}", viewMatrix[i][0], viewMatrix[i][1], viewMatrix[i][2], viewMatrix[i][3]);
+          ipu_utils::logger()->info("Dynamic view matrix: {} {} {} {}", dynamicView[i][0], dynamicView[i][1], dynamicView[i][2], dynamicView[i][3]);
         }
 
         //print state
