@@ -285,7 +285,9 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
 // for TUM desk:
 // 450
 // chan * 2
-  unsigned numPoints = 350;
+  // Widened from 350 after the framebuffer compression freed ~7.7 KB/tile.
+  // Each +1 costs 640 B/tile (8 channels * 64 B + extra_storage 2 * 64 B).
+  unsigned numPoints = 360;
   std::size_t channelSize = numPoints * grainSize;
   std::size_t extraStorageSize = channelSize * 2;
 
