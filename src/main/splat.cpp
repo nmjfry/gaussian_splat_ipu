@@ -299,29 +299,20 @@ int main(int argc, char** argv) {
 // envRotationDegrees: 85.763603
 // envRotationDegrees2: 184.763657
 // fov: 0.433323
-      dynamicView = viewMatrix;
-
-      // dynamicView[3][0] = 0.0f;  // Set T_x
-      // dynamicView[3][1] = 0.0f;  // Set T_y
-      // dynamicView[3][2] = 0.0f;  // Set T_z
-
-      // auto inv = glm::inverse(dynamicView);
-      // auto r1 = glm::rotate(glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
-      // auto r2 = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
-      
-      // inv = r1 * r2 * inv;
-      // dynamicView = glm::inverse(inv);
-      auto r1 = glm::rotate(glm::radians(state.envRotationDegrees), glm::vec3(1.f, 0.f, 0.f));
-      auto r2  = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
-      dynamicView = r1 * r2 * dynamicView;
-      // Zoom: translate along the camera's local Z axis.
-      // state.Z=0 means no change; negative = closer, positive = farther.
-      // We apply the offset AFTER rotation so it's in camera space (row 2 of the
-      // view matrix = camera's forward direction). The translation column (col 3)
-      // in the view matrix encodes -dot(axis, eye), so adding to [3][2] moves
-      // the camera along its local Z.
-      const float initialDist = glm::length(bb.diagonal());
-      dynamicView[3][2] += state.Z * initialDist * 0.002f;
+      // FPS camera control (WASD + mouse-look from the client):
+      //   envRotationDegrees   = pitch (rotation about camera X)
+      //   envRotationDegrees2  = yaw   (rotation about world Y)
+      //   (X, Y, Z)            = world-space camera offset from the initial pose
+      //
+      // Final view = R_pitch * R_yaw * T(-offset) * initialView
+      //
+      // The client computes offsets in world space using its own yaw/pitch, so
+      // forward/back/strafe behave like a typical game engine. With all params
+      // zero, dynamicView == viewMatrix (the centred bounding-box view).
+      glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
+      glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
+      glm::mat4 T_off   = glm::translate(glm::mat4(1.0f), -glm::vec3(state.X, state.Y, state.Z));
+      dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
 
       
     } else {
