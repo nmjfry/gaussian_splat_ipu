@@ -33,7 +33,10 @@ void addOptions(boost::program_options::options_description& desc) {
   ("device", po::value<std::string>()->default_value("cpu"),
    "Choose the render device")
   ("no-amp", po::bool_switch()->default_value(true),
-   "Disable use of optimised AMP codelets.");
+   "Disable use of optimised AMP codelets.")
+  ("flip-up", po::bool_switch()->default_value(false),
+   "Flip the world up-axis. Use this for COLMAP / Gaussian Splatting SLAM scenes "
+   "(where world +Y points down) so the scene renders right-side-up.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -181,10 +184,13 @@ int main(int argc, char** argv) {
     uiServer->updateFov(state.fov);
   }
 
-  // Set up the modelling and projection transforms in an OpenGL compatible way:
-  // Scale=2: camera is 2*radius from centroid so the near face of the BB is at
-  // distance radius from the camera (not zero, which would be at the camera plane).
-  auto viewMatrix = splat::lookAtBoundingBox(bb, glm::vec3(0.f , 1.f, 0.f), 2.f);
+  // Set up the modelling and projection transforms in an OpenGL compatible way.
+  // For COLMAP-derived scenes (e.g. Gaussian Splatting SLAM outputs), world +Y
+  // points DOWN — use --flip-up to get a right-side-up render.
+  const bool flipUp = args["flip-up"].as<bool>();
+  glm::vec3 upAxis = flipUp ? glm::vec3(0.f, -1.f, 0.f) : glm::vec3(0.f, 1.f, 0.f);
+  auto viewMatrix = splat::lookAtBoundingBox(bb, upAxis, 2.f);
+  ipu_utils::logger()->info("Using world up = {}", flipUp ? "-Y (COLMAP/SLAM)" : "+Y (OpenGL)");
 
   // Transform the BB to camera/eye space:
   splat::Bounds3f bbInCamera(
@@ -253,6 +259,11 @@ int main(int argc, char** argv) {
     auto endTime = std::chrono::steady_clock::now();
     auto splatTimeSecs = std::chrono::duration<double>(endTime - startTime).count();
 
+    // Send the pure render time (pre-frame-upload) to the client every frame.
+    if (uiServer) {
+      uiServer->sendRenderTime(float(splatTimeSecs * 1000.0));
+    }
+
     secondsElapsed += splatTimeSecs;
     if (secondsElapsed > 3.f) {
       ipu_utils::logger()->info("Splat time: {} points/sec: {}", splatTimeSecs, pts.size()/splatTimeSecs);
@@ -302,16 +313,18 @@ int main(int argc, char** argv) {
       // FPS camera control (WASD + mouse-look from the client):
       //   envRotationDegrees   = pitch (rotation about camera X)
       //   envRotationDegrees2  = yaw   (rotation about world Y)
-      //   (X, Y, Z)            = world-space camera offset from the initial pose
+      //   (X, Y, Z)            = camera offset, in units of the scene diagonal
       //
-      // Final view = R_pitch * R_yaw * T(-offset) * initialView
+      // Final view = R_pitch * R_yaw * T(-offset * sceneScale) * initialView
       //
-      // The client computes offsets in world space using its own yaw/pitch, so
-      // forward/back/strafe behave like a typical game engine. With all params
-      // zero, dynamicView == viewMatrix (the centred bounding-box view).
+      // Scaling the client's offset by the scene diagonal makes WASD motion
+      // feel the same regardless of scene units (COLMAP scenes can be tiny or
+      // large). With all params zero, dynamicView == viewMatrix.
+      const float sceneScale = glm::length(bb.diagonal());
       glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
       glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
-      glm::mat4 T_off   = glm::translate(glm::mat4(1.0f), -glm::vec3(state.X, state.Y, state.Z));
+      glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
+                                         -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
       dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
 
       

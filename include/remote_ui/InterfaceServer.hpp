@@ -37,6 +37,7 @@ const std::vector<std::string> packetTypes {
     "fov",                 // Update field-of-view (bi-directional)
     "render_preview",      // used to send compressed video packets
                            // for render preview (server -> client)
+    "render_time",         // server-measured render time in milliseconds (server -> client)
     "ready",               // Used to sync with the other side once all other subscribers are ready (bi-directional)
     "tile_histogram",      // Histogram tile workload distribution (server -> client)
     "device",              // Tell server which device to use (cpu, ipu) (client -> server)
@@ -329,6 +330,11 @@ public:
 
   void sendHistogram(const std::vector<std::uint32_t>& data) {
     serialise(*sender, "tile_histogram", data);
+  }
+
+  /// Send the server-measured render time (milliseconds) for telemetry.
+  void sendRenderTime(float milliseconds) {
+    if (sender) serialise(*sender, "render_time", milliseconds);
   }
 
   /// Send a raw uncompressed (e.g. HDR) image slowly in chunks in the background:
