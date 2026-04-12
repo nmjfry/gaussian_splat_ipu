@@ -80,6 +80,8 @@ def render(g, V_np, width, height, fov_y_deg, out_path):
     from diff_gaussian_rasterization import (
         GaussianRasterizationSettings, GaussianRasterizer,
     )
+    # The IPU server now emits COLMAP-convention view matrices (matching DGR).
+    # No additional view-space flips needed here.
 
     # Original 3DGS transposes both matrices before handing them to CUDA.
     aspect = width / float(height)

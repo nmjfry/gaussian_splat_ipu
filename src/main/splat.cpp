@@ -331,6 +331,17 @@ int main(int argc, char** argv) {
                                          -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
       dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
 
+      // Convert OpenGL-style view (camera looks -Z, world +Y up on screen) to
+      // COLMAP / 3DGS style (camera looks +Z, world +Y down in view) so the
+      // same matrix + projection can be fed directly to diff-gaussian-
+      // rasterization. This flips the Y and Z rows of dynamicView.
+      static const glm::mat4 kOpenGLToColmap = glm::mat4(
+          glm::vec4( 1.f,  0.f,  0.f, 0.f),
+          glm::vec4( 0.f, -1.f,  0.f, 0.f),
+          glm::vec4( 0.f,  0.f, -1.f, 0.f),
+          glm::vec4( 0.f,  0.f,  0.f, 1.f));
+      dynamicView = kOpenGLToColmap * dynamicView;
+
       
     } else {
       // Only log these if not in interactive mode:

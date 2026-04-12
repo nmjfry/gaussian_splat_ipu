@@ -8,24 +8,29 @@ struct Viewport {
   Viewport(float x, float y, float width, float height)
     : spec(x, y, width, height) {}
 
-  // The input point should be in normalised device coords
-  // (i.e. perspective division is already applied):
+  // Match diff-gaussian-rasterization's ndc2Pix exactly:
+  //   pixel = ((ndc + 1) * S - 1) * 0.5
+  // This treats integer pixel coord i as the CENTRE of that pixel (so pixel 0
+  // sits at ndc = (1 - S)/S, not at ndc = -1). Without this, the Gaussian
+  // means land half a pixel off from where DGR puts them.
   glm::vec2 ndcToViewport(glm::vec4 ndc) const {
-    glm::vec2 vp(ndc.x, ndc.y);
-    vp *= .5f;
-    vp += .5f;
-    return viewportTransform(vp);
+    glm::vec2 vp;
+    vp.x = ((ndc.x + 1.f) * spec[2] - 1.f) * 0.5f + spec[0];
+    vp.y = ((ndc.y + 1.f) * spec[3] - 1.f) * 0.5f + spec[1];
+    return vp;
   }
 
-  // Combine perspective division with viewport scaling:
   glm::vec2 clipSpaceToViewport(glm::vec4 cs) const {
-    glm::vec2 vp(cs.x, cs.y);
-    vp *= .5f / cs.w;
-    vp += .5f;
-    return viewportTransform(vp);
+    // Perspective divide, then ndc2Pix (DGR convention).
+    glm::vec2 ndc(cs.x / cs.w, cs.y / cs.w);
+    glm::vec2 vp;
+    vp.x = ((ndc.x + 1.f) * spec[2] - 1.f) * 0.5f + spec[0];
+    vp.y = ((ndc.y + 1.f) * spec[3] - 1.f) * 0.5f + spec[1];
+    return vp;
   }
 
-  // Converts from normalised screen coords to the specified view window:
+  // Legacy helper — kept for any callers still using it (e.g. CPU point
+  // rasteriser); matches the old half-open [0, S] mapping.
   glm::vec2 viewportTransform(glm::vec2 v) const {
     v.x *= spec[2];
     v.y *= spec[3];

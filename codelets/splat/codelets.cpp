@@ -240,9 +240,9 @@ public:
     for (int j = low; j <= high - sizeof(G); j+=sizeof(G)) {
         G gm;
         std::memcpy(&gm, &elements[j], sizeof(G));
-        // Front-to-back: in OpenGL view space, closest = largest (least negative) z.
-        // Sort descending so front Gaussians composite first.
-        if (gm.z >= pivotG.z) {
+        // Front-to-back: in COLMAP view space, closest = smallest (positive) z.
+        // Sort ASCENDING so front Gaussians composite first.
+        if (gm.z <= pivotG.z) {
             i+=sizeof(G);
             swap<G>(&elements[i], &elements[j]);
         }
@@ -400,7 +400,9 @@ public:
         }
       }
 
-      if (withinGuardBand && g2D.z < 0.0f ) {
+      // COLMAP convention: visible Gaussians have view_z > 0 (in front of camera).
+      // Also near-cull anything with view_z below a small positive threshold.
+      if (withinGuardBand && g2D.z > 0.2f) {
         auto g2Idx = toRender * sizeof(Gaussian2D);
         insertAt(gaus2D, g2Idx, g2D);
         toRender++;
