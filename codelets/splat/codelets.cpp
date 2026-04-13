@@ -350,11 +350,14 @@ public:
     const auto mvp = projmatrix * viewmatrix;
     // fxy[0] = half-FOV-Y in radians (halved by InterfaceServer).
     // Compute separate tan_fov and focal for x and y (matches original 3DGS).
+    // IMPORTANT: tfb.width/height are uint16_t — cast to float BEFORE dividing
+    // or C++ does integer division and aspect collapses to 1.0, producing an
+    // fx that is wrong by a factor of (real_aspect) in each tile's Cov2D.
     float tan_fovy = glm::tan(fxy[0]);
-    float tan_fovx = tan_fovy * (tfb.width / tfb.height); // aspect ratio
+    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
     glm::vec2 tanfov(tan_fovx, tan_fovy);
-    float focal_y = tfb.height / (2.f * tan_fovy);
-    float focal_x = tfb.width  / (2.f * tan_fovx);
+    float focal_y = float(tfb.height) / (2.f * tan_fovy);
+    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
     glm::vec2 focal(focal_x, focal_y);
 
     auto toRender = 0u;
@@ -426,11 +429,13 @@ public:
     const auto tbPrev = tfb.getTileBounds(tfb.getNearbyTile(tile_id[0], recievedFrom));
 
     // Compute separate tan_fov and focal for x and y (matches original 3DGS).
+    // Cast tfb.width/height (uint16_t) to float BEFORE dividing — see the
+    // matching comment in renderInternal.
     float tan_fovy = glm::tan(fxy[0]);
-    float tan_fovx = tan_fovy * (tfb.width / tfb.height);
+    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
     glm::vec2 tanfov(tan_fovx, tan_fovy);
-    float focal_y = tfb.height / (2.f * tan_fovy);
-    float focal_x = tfb.width  / (2.f * tan_fovx);
+    float focal_y = float(tfb.height) / (2.f * tan_fovy);
+    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
     glm::vec2 focal(focal_x, focal_y);
 
     const auto mvp = projmatrix * viewmatrix;
