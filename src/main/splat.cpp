@@ -2,8 +2,12 @@
 
 #include "glm/matrix.hpp"
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 #include <ipu/options.hpp>
 #include <ipu/ipu_utils.hpp>
@@ -36,7 +40,10 @@ void addOptions(boost::program_options::options_description& desc) {
    "Disable use of optimised AMP codelets.")
   ("flip-up", po::bool_switch()->default_value(false),
    "Flip the world up-axis. Use this for COLMAP / Gaussian Splatting SLAM scenes "
-   "(where world +Y points down) so the scene renders right-side-up.");
+   "(where world +Y points down) so the scene renders right-side-up.")
+  ("paired-shots-dir", po::value<std::string>()->default_value("paired_shots"),
+   "Where to save framebuffer + pose JSON when the client clicks Screenshot. "
+   "A sibling watcher (tools/gpu_watch.py) turns each JSON into a GPU reference render.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -262,6 +269,41 @@ int main(int argc, char** argv) {
     // Send the pure render time (pre-frame-upload) to the client every frame.
     if (uiServer) {
       uiServer->sendRenderTime(float(splatTimeSecs * 1000.0));
+    }
+
+    // Handle paired-screenshot request: save the current framebuffer and a JSON
+    // sidecar describing the pose. tools/gpu_watch.py picks the JSON up and
+    // runs diff-gaussian-rasterization at the same pose to produce the matching
+    // GPU reference image.
+    if (uiServer && uiServer->consumeScreenshotRequest()) {
+      namespace fs = std::filesystem;
+      fs::path outDir = args["paired-shots-dir"].as<std::string>();
+      std::error_code ec;
+      fs::create_directories(outDir, ec);
+
+      auto now = std::time(nullptr);
+      char ts[32];
+      std::strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", std::localtime(&now));
+      std::string stem = std::string("screenshot-") + ts;
+      fs::path pngPath  = outDir / (stem + ".png");
+      fs::path jsonPath = outDir / (stem + ".json");
+
+      cv::imwrite(pngPath.string(), *imagePtr);
+
+      std::ofstream js(jsonPath);
+      js << "{\n";
+      js << "  \"view_matrix\": [";
+      for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+          js << dynamicView[c][r];
+          if (!(c == 3 && r == 3)) js << ", ";
+        }
+      }
+      js << "],\n";
+      js << "  \"fov_half_rad\": " << state.fov << ",\n";
+      js << "  \"ply\": \"" << xyzFile << "\"\n";
+      js << "}\n";
+      ipu_utils::logger()->info("Saved paired-shot to {} (+ .json)", pngPath.string());
     }
 
     secondsElapsed += splatTimeSecs;

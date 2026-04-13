@@ -38,6 +38,7 @@ const std::vector<std::string> packetTypes {
     "render_preview",      // used to send compressed video packets
                            // for render preview (server -> client)
     "render_time",         // server-measured render time in milliseconds (server -> client)
+    "screenshot",          // client asks the server to save a paired framebuffer + pose JSON
     "ready",               // Used to sync with the other side once all other subscribers are ready (bi-directional)
     "tile_histogram",      // Histogram tile workload distribution (server -> client)
     "device",              // Tell server which device to use (cpu, ipu) (client -> server)
@@ -203,6 +204,14 @@ class InterfaceServer {
                                         stateUpdated = true;
                                       });
 
+      auto subsScreenshot = receiver.subscribe("screenshot",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        bool dummy = true;
+                                        try { deserialise(packet, dummy); } catch (...) {}
+                                        screenshotRequested.store(true);
+                                        ipu_utils::logger()->info("Screenshot requested by client.");
+                                      });
+
       ipu_utils::logger()->info("User interface server entering Tx/Rx loop.");
       syncWithClient(*sender, receiver, "ready");
       serverReady = true;
@@ -337,6 +346,11 @@ public:
     if (sender) serialise(*sender, "render_time", milliseconds);
   }
 
+  /// Returns true once (atomically) if the client has requested a paired
+  /// IPU+GPU screenshot. Resets the flag so the caller handles exactly one
+  /// save per click.
+  bool consumeScreenshotRequest() { return screenshotRequested.exchange(false); }
+
   /// Send a raw uncompressed (e.g. HDR) image slowly in chunks in the background:
   bool startSendingRawImage(cv::Mat&& rawImage, std::size_t step) {
     // Wait for any previous tasks to complete:
@@ -403,6 +417,7 @@ private:
   std::atomic<bool> stopServer;
   std::atomic<bool> serverReady;
   std::atomic<bool> stateUpdated;
+  std::atomic<bool> screenshotRequested{false};
   std::unique_ptr<TcpSocket> connection;
   std::unique_ptr<PacketMuxer> sender;
   std::unique_ptr<LibAvWriter> videoStream;

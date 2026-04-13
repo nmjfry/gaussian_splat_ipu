@@ -230,6 +230,33 @@ Useful server flags:
   scene placement)
 - `--flip-up` — for scenes whose world Y is inverted; rarely needed now
 - `--no-amp` — disables optimised AMP codelets (default: disabled)
+- `--paired-shots-dir <dir>` — where Screenshot-button paired renders go
+  (default `paired_shots/`).
+
+### Paired IPU + GPU screenshots (one click → two images)
+
+When the client's **Screenshot** button is pressed it (1) saves the decoded
+video frame locally, and (2) sends a `screenshot` packet to the server, which
+writes its own framebuffer + a sidecar `.json` describing the pose into
+`--paired-shots-dir`. A watcher script on the host polls that dir and runs
+`render_gpu_dgr.py` at exactly the same pose, producing
+`screenshot-YYYYMMDD-HHMMSS_gpu.png` alongside the IPU `screenshot-...png`.
+
+Run order:
+
+```bash
+# HOST (needs CUDA / venv .venv-gpu with diff-gaussian-rasterization):
+./tools/start_watcher.sh                 # leaves a watcher tailing the dir
+
+# CONTAINER (IPU):
+./build/src/main/splat --input data/salad.ply --ui-port 5000
+
+# Laptop: start the remote UI as usual, click Screenshot.
+```
+
+The `paired_shots/` dir is bind-mounted (container `/home/$USER/...` =
+host `/nethome/$USER/...`) so the watcher sees what the server writes without
+any extra plumbing.
 
 The server logs the current `Dynamic view matrix` (4 lines = 4 GLM columns)
 and `fov` (HALF-FOV in radians) every few seconds. These are what you feed the
