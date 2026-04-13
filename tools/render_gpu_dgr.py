@@ -36,7 +36,16 @@ def load_ply(path):
     sc = np.stack([data["scale_0"], data["scale_1"], data["scale_2"]], -1).astype(np.float32)
     rot = np.stack([data["rot_0"], data["rot_1"], data["rot_2"], data["rot_3"]], -1).astype(np.float32)
     rgb, opacity, scale = _activations(f_dc, opac, sc)
-    print(f"  {len(xyz)} gaussians from {path}")
+
+    # The IPU server re-centres the scene on load (subtracts the bounding-box
+    # centroid so everything sits at world origin). If we don't do the same
+    # here, the view matrix logged by the IPU assumes a scene centred at
+    # origin but the raw PLY might be offset, producing a shifted render.
+    lo = xyz.min(axis=0)
+    hi = xyz.max(axis=0)
+    centroid = 0.5 * (lo + hi)
+    xyz = xyz - centroid
+    print(f"  {len(xyz)} gaussians from {path}  (centred, shift={centroid.tolist()})")
 
     return dict(
         means3D   = torch.from_numpy(xyz).cuda(),
