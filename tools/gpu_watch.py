@@ -47,21 +47,41 @@ def render_pair(json_path: Path, renderer: Path, python: str) -> bool:
         print(f"  [!] view_matrix should have 16 floats, got {len(vm)}")
         return False
 
-    # If the JSON has a relative PLY path (older server builds), try to find it
-    # under a few likely base dirs before giving up.
+    # Resolve the PLY path. Two common issues:
+    #  (1) old sidecars stored relative paths (../data/...)
+    #  (2) the server runs in a Docker container where /home/<user>/... is
+    #      bind-mounted to /nethome/<user>/... on the host, so absolute
+    #      container paths are invalid on the host where the watcher runs.
+    import os
     ply_path = Path(ply)
-    if not ply_path.is_absolute() and not ply_path.exists():
-        candidates = [
-            renderer.parent.parent / ply,         # repo root (renderer is in tools/)
-            json_path.parent.parent / ply,        # one above sidecar dir
-            json_path.parent / ply,               # next to sidecar
-            Path.cwd() / ply,                     # cwd
-        ]
+
+    def rewrite_container_to_host(p: Path) -> Path:
+        # /home/<user>/... -> /nethome/<user>/... (common IPU-container mount)
+        parts = p.parts
+        if len(parts) >= 3 and parts[0] == "/" and parts[1] == "home":
+            return Path("/nethome", *parts[2:])
+        return p
+
+    if not ply_path.exists():
+        candidates = []
+        if ply_path.is_absolute():
+            candidates.append(rewrite_container_to_host(ply_path))
+        else:
+            candidates += [
+                renderer.parent.parent / ply,       # repo root (renderer in tools/)
+                json_path.parent.parent / ply,      # one above sidecar dir
+                json_path.parent / ply,             # next to sidecar
+                Path.cwd() / ply,                   # cwd
+            ]
         for c in candidates:
+            try:
+                c = c.resolve(strict=False)
+            except Exception:
+                continue
             if c.exists():
-                ply_path = c.resolve()
-                ply = str(ply_path)
-                print(f"  resolved relative ply to {ply}")
+                ply = str(c)
+                ply_path = c
+                print(f"  resolved ply -> {ply}")
                 break
         else:
             print(f"  [!] could not locate '{ply}'; tried: {[str(c) for c in candidates]}")
