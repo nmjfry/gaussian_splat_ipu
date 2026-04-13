@@ -373,7 +373,11 @@ int main(int argc, char** argv) {
       }
       js << "],\n";
       js << "  \"fov_half_rad\": " << state.fov << ",\n";
-      js << "  \"ply\": \"" << xyzFile << "\"\n";
+      // Always store an absolute path so the watcher (which runs from a
+      // different cwd) can find the PLY regardless.
+      std::error_code ecAbs;
+      auto absPly = std::filesystem::absolute(xyzFile, ecAbs);
+      js << "  \"ply\": \"" << (ecAbs ? xyzFile : absPly.string()) << "\"\n";
       js << "}\n";
       ipu_utils::logger()->info("Saved paired-shot to {} (+ .json)", pngPath.string());
     }

@@ -249,14 +249,22 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   const auto csName = disableAMPVertices ? "project" : "project_amp";
   auto splatCs = vg.addComputeSet(csName);
 
-// for TUM desk:
-// 450
-// chan * 2
-  // Widened from 350 after the framebuffer compression freed ~7.7 KB/tile.
-  // Each +1 costs 640 B/tile (8 channels * 64 B + extra_storage 2 * 64 B).
-  unsigned numPoints = 360;
+  // Per-tile capacity tuning. With Gaussian3D = 60 B and Gaussian2D = 40 B and
+  // 8 NEWS channels, raising numPoints by 1 (with multiplier=4) costs roughly:
+  //   8*60   (channels)
+  // + 60*4   (extra_storage)
+  // + 40*4   (z-buffer scales with tile gaussian capacity)
+  // +  4*4   (sort indices)
+  // = ~896 B per tile.
+  // Out of 624 KB per tile the configuration below uses ~530 KB total
+  // (channels 281 KB, extra_storage 141 KB, z-buffer 95 KB, indices 10 KB,
+  // framebuffer 2.5 KB, plus codelet code + worker stacks). This is roughly
+  // 1.7x the previous channel capacity and 4x the previous storage capacity,
+  // which removes most rectangular holes / dropped Gaussians on dense scenes
+  // like TUM desk and 30k-iter bonsai.
+  unsigned numPoints = 600;
   std::size_t channelSize = numPoints * grainSize;
-  std::size_t extraStorageSize = channelSize * 2;
+  std::size_t extraStorageSize = channelSize * 4;
 
   // construct z-buffer program to sort the gaussians
   program::Sequence sortGaussians;

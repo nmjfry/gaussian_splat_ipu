@@ -47,6 +47,26 @@ def render_pair(json_path: Path, renderer: Path, python: str) -> bool:
         print(f"  [!] view_matrix should have 16 floats, got {len(vm)}")
         return False
 
+    # If the JSON has a relative PLY path (older server builds), try to find it
+    # under a few likely base dirs before giving up.
+    ply_path = Path(ply)
+    if not ply_path.is_absolute() and not ply_path.exists():
+        candidates = [
+            renderer.parent.parent / ply,         # repo root (renderer is in tools/)
+            json_path.parent.parent / ply,        # one above sidecar dir
+            json_path.parent / ply,               # next to sidecar
+            Path.cwd() / ply,                     # cwd
+        ]
+        for c in candidates:
+            if c.exists():
+                ply_path = c.resolve()
+                ply = str(ply_path)
+                print(f"  resolved relative ply to {ply}")
+                break
+        else:
+            print(f"  [!] could not locate '{ply}'; tried: {[str(c) for c in candidates]}")
+            return False
+
     fov_deg = fov_half_rad * 2.0 * 180.0 / math.pi
     vm_str = " ".join(f"{v:.10g}" for v in vm)
     out_png = json_path.with_name(json_path.stem + "_gpu.png")
