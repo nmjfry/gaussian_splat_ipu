@@ -49,7 +49,14 @@ Cam makeCam() {
   float tan_fovy = tanf(fovY / 2.0f);
   float tan_fovx = tan_fovy * aspect;
   Cam c;
-  c.view = glm::lookAt(glm::vec3(0, 0, 1), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+  // Build an OpenGL-style view matrix then apply the IPU's runtime OpenGL->COLMAP
+  // conversion (diag(1,-1,-1,1) pre-multiplied) so the test reflects what the IPU
+  // actually feeds to its codelet / to DGR.
+  glm::mat4 V_opengl = glm::lookAt(glm::vec3(0, 0, 1), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+  glm::mat4 flipYZ(1.f);
+  flipYZ[1][1] = -1.f;
+  flipYZ[2][2] = -1.f;
+  c.view = flipYZ * V_opengl;
   c.proj = glm::perspective(fovY, aspect, 0.01f, 100.0f);
   c.tan_fovx = tan_fovx;
   c.tan_fovy = tan_fovy;
