@@ -43,7 +43,10 @@ void addOptions(boost::program_options::options_description& desc) {
    "(where world +Y points down) so the scene renders right-side-up.")
   ("paired-shots-dir", po::value<std::string>()->default_value("paired_shots"),
    "Where to save framebuffer + pose JSON when the client clicks Screenshot. "
-   "A sibling watcher (tools/gpu_watch.py) turns each JSON into a GPU reference render.");
+   "A sibling watcher (tools/gpu_watch.py) turns each JSON into a GPU reference render.")
+  ("from-pose", po::value<std::string>()->default_value(""),
+   "Path to a sidecar .json saved by the Screenshot button. Loads the view "
+   "matrix and FOV from it so the server starts with that exact pose.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -181,11 +184,64 @@ int main(int argc, char** argv) {
   // Setup a user interface server if requested:
   std::unique_ptr<InterfaceServer> uiServer;
   InterfaceServer::State state;
-  
+
   state.device = args.at("device").as<std::string>();
+
+  // --from-pose: load a previously-saved Screenshot sidecar and use it as the
+  // starting camera. The JSON stores the final COLMAP-convention dynamicView;
+  // the server still applies its OpenGL->COLMAP flip at render time, so we
+  // flip again here (self-inverse) to get the OpenGL matrix the pipeline
+  // expects as input. Also loads fov.
+  std::vector<float> loadedViewColmap;   // empty unless --from-pose set
+  float loadedFovHalfRad = 0.f;
+  {
+    const std::string posePath = args["from-pose"].as<std::string>();
+    if (!posePath.empty()) {
+      std::ifstream f(posePath);
+      if (!f) {
+        ipu_utils::logger()->warn("Could not open --from-pose {}; ignoring", posePath);
+      } else {
+        std::string content((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+        auto findKey = [&](const std::string& key) { return content.find("\"" + key + "\""); };
+
+        // view_matrix: 16 floats inside [ ... ]
+        auto k = findKey("view_matrix");
+        if (k != std::string::npos) {
+          auto lb = content.find('[', k);
+          auto rb = content.find(']', lb);
+          if (lb != std::string::npos && rb != std::string::npos) {
+            std::string body = content.substr(lb + 1, rb - lb - 1);
+            std::replace(body.begin(), body.end(), ',', ' ');
+            std::stringstream ss(body);
+            float v;
+            while (ss >> v) loadedViewColmap.push_back(v);
+          }
+        }
+        if (loadedViewColmap.size() != 16) {
+          ipu_utils::logger()->warn("--from-pose {}: view_matrix must have 16 floats, got {}",
+                                    posePath, loadedViewColmap.size());
+          loadedViewColmap.clear();
+        }
+
+        // fov_half_rad
+        auto kf = findKey("fov_half_rad");
+        if (kf != std::string::npos) {
+          auto colon = content.find(':', kf);
+          try { loadedFovHalfRad = std::stof(content.substr(colon + 1)); }
+          catch (...) { loadedFovHalfRad = 0.f; }
+        }
+        if (loadedFovHalfRad > 0.f) state.fov = loadedFovHalfRad;
+        ipu_utils::logger()->info("--from-pose loaded from {} (fov_half_rad = {})",
+                                  posePath, loadedFovHalfRad);
+      }
+    }
+  }
+
   auto uiPort = args.at("ui-port").as<int>();
   if (uiPort) {
     uiServer.reset(new InterfaceServer(uiPort));
+    if (loadedFovHalfRad > 0.f) uiServer->setInitialFov(loadedFovHalfRad);
     uiServer->start();
     uiServer->initialiseVideoStream(imagePtr->cols, imagePtr->rows);
     uiServer->updateFov(state.fov);
@@ -198,6 +254,22 @@ int main(int argc, char** argv) {
   glm::vec3 upAxis = flipUp ? glm::vec3(0.f, -1.f, 0.f) : glm::vec3(0.f, 1.f, 0.f);
   auto viewMatrix = splat::lookAtBoundingBox(bb, upAxis, 2.f);
   ipu_utils::logger()->info("Using world up = {}", flipUp ? "-Y (COLMAP/SLAM)" : "+Y (OpenGL)");
+
+  // If --from-pose loaded a view matrix, use it in place of lookAtBoundingBox.
+  // The JSON holds the COLMAP-convention dynamicView; the pipeline later
+  // re-applies kOpenGLToColmap, so we flip here first (self-inverse) to get
+  // back the OpenGL matrix the pipeline expects as input.
+  if (loadedViewColmap.size() == 16) {
+    glm::mat4 V_colmap(0.f);
+    for (int c = 0; c < 4; ++c)
+      for (int r = 0; r < 4; ++r)
+        V_colmap[c][r] = loadedViewColmap[c * 4 + r];
+    glm::mat4 flipYZ(1.0f);
+    flipYZ[1][1] = -1.0f;
+    flipYZ[2][2] = -1.0f;
+    viewMatrix = flipYZ * V_colmap;
+    ipu_utils::logger()->info("Initial view matrix overridden by --from-pose");
+  }
 
   // Transform the BB to camera/eye space:
   splat::Bounds3f bbInCamera(

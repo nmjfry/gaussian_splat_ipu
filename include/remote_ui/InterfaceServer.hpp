@@ -260,6 +260,12 @@ public:
     return tmp;
   }
 
+  /// Seed the server's internal state. Intended to be called BEFORE start()
+  /// (e.g. when the server is launched with --from-pose and needs a specific
+  /// initial fov that should survive the first consumeState()).
+  void setInitialState(const State& s) { state = s; }
+  void setInitialFov(float fovHalfRad) { state.fov = fovHalfRad; }
+
   const State& getState() const {
     return state;
   }
