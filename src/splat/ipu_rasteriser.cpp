@@ -249,22 +249,27 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   const auto csName = disableAMPVertices ? "project" : "project_amp";
   auto splatCs = vg.addComputeSet(csName);
 
-  // Per-tile capacity tuning. With Gaussian3D = 60 B and Gaussian2D = 40 B and
-  // 8 NEWS channels, raising numPoints by 1 (with multiplier=4) costs roughly:
-  //   8*60   (channels)
-  // + 60*4   (extra_storage)
-  // + 40*4   (z-buffer scales with tile gaussian capacity)
-  // +  4*4   (sort indices)
-  // = ~896 B per tile.
-  // Out of 624 KB per tile the configuration below uses ~530 KB total
-  // (channels 281 KB, extra_storage 141 KB, z-buffer 95 KB, indices 10 KB,
-  // framebuffer 2.5 KB, plus codelet code + worker stacks). This is roughly
-  // 1.7x the previous channel capacity and 4x the previous storage capacity,
-  // which removes most rectangular holes / dropped Gaussians on dense scenes
-  // like TUM desk and 30k-iter bonsai.
-  unsigned numPoints = 600;
+  // Per-tile capacity tuning. NOTE: the storage tensors are declared as
+  //   addVariable(poplar::FLOAT, {extraStorageSize})  // length in FLOATS
+  // so `extraStorageSize` is in float elements, NOT bytes. Each Gaussian
+  // occupies sizeof(Gaussian3D) FLOATS in the buffer (== 60 floats == 240
+  // bytes), of which only 15 floats (60 B) are real data — the loader pushes
+  // sizeof(struct) floats per Gaussian, the codelet steps by the same
+  // amount. So per +1 to numPoints (with multiplier M):
+  //   8 channels   :   8 * 60 B               = 480 B
+  //   extra_storage:   60 * M floats * 4      = 240*M B
+  //   z-buffer     :   40 * M floats * 4      = 160*M B
+  //   indices      :    4 * M B               =   4*M B
+  // = 480 + 404*M  bytes per tile per +1 numPoints.
+  //
+  // The original numPoints=360 / multiplier=2 already used ~470 KB of the
+  // 624 KB tile (plus ~130 KB code + stacks), leaving little headroom. A
+  // small bump is the realistic ceiling without a deeper packing fix.
+  // numPoints=400 / multiplier=2 uses ~50 KB more — usually fits; if popc
+  // complains, drop to 380.
+  unsigned numPoints = 400;
   std::size_t channelSize = numPoints * grainSize;
-  std::size_t extraStorageSize = channelSize * 4;
+  std::size_t extraStorageSize = channelSize * 2;
 
   // construct z-buffer program to sort the gaussians
   program::Sequence sortGaussians;
