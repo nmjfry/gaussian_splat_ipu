@@ -41,6 +41,10 @@ void addOptions(boost::program_options::options_description& desc) {
   ("flip-up", po::bool_switch()->default_value(false),
    "Flip the world up-axis. Use this for COLMAP / Gaussian Splatting SLAM scenes "
    "(where world +Y points down) so the scene renders right-side-up.")
+  ("flip-scene", po::bool_switch()->default_value(false),
+   "Rotate the scene 180 deg around the world X axis (negates Y and Z of all "
+   "world coordinates). Use this for scenes that appear both upside-down AND "
+   "facing away from the camera.")
   ("paired-shots-dir", po::value<std::string>()->default_value("paired_shots"),
    "Where to save framebuffer + pose JSON when the client clicks Screenshot. "
    "A sibling watcher (tools/gpu_watch.py) turns each JSON into a GPU reference render.")
@@ -254,6 +258,17 @@ int main(int argc, char** argv) {
   glm::vec3 upAxis = flipUp ? glm::vec3(0.f, -1.f, 0.f) : glm::vec3(0.f, 1.f, 0.f);
   auto viewMatrix = splat::lookAtBoundingBox(bb, upAxis, 2.f);
   ipu_utils::logger()->info("Using world up = {}", flipUp ? "-Y (COLMAP/SLAM)" : "+Y (OpenGL)");
+
+  // --flip-scene: rotate world 180 deg around X (negate Y,Z of world coords).
+  // Equivalent to post-multiplying the view matrix by diag(1,-1,-1,1). Fixes
+  // scenes that load both upside-down and facing away from the camera.
+  if (args["flip-scene"].as<bool>()) {
+    glm::mat4 R_x180(1.0f);
+    R_x180[1][1] = -1.0f;
+    R_x180[2][2] = -1.0f;
+    viewMatrix = viewMatrix * R_x180;
+    ipu_utils::logger()->info("Scene rotated 180 deg around X (--flip-scene)");
+  }
 
   // If --from-pose loaded a view matrix, use it in place of lookAtBoundingBox.
   // The JSON holds the COLMAP-convention dynamicView; the pipeline later
