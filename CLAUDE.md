@@ -64,10 +64,14 @@ gaussian_splat_ipu/
 │   ├── remote_ui/InterfaceServer.hpp  # packet schema + State struct
 │   └── tileMapping/tile_config.hpp    # IPU_TILEWIDTH/HEIGHT, TiledFramebuffer
 ├── codelets/
-│   └── splat/codelets.cpp        # IPU tile-local code: route, bloom, sort, composite
+│   └── splat/codelets.cpp        # IPU tile-local code: RouteVertex + BlendVertex
 ├── tools/
 │   ├── fetch_dylanebert_3dgs.py  # download scenes from HF (strips higher SH)
-│   └── render_gpu_dgr.py         # CUDA reference renderer (host only)
+│   ├── render_gpu_dgr.py         # CUDA reference renderer (host only)
+│   ├── plot_profile.py           # plot benchmark CSV (timing + convergence)
+│   ├── benchmark_with_power.sh   # run benchmark with gc-monitor power sampling
+│   ├── benchmark_pose*.json      # saved poses for reproducible benchmarks
+│   └── churn_experiment.cpp      # CPU-only tile-churn measurement
 ├── tests/
 │   ├── test.cpp
 │   ├── test_comparison.cpp       # unit test: IPU math == original 3DGS math
@@ -143,30 +147,67 @@ the static helper for the 3σ-radius bounding box.
 
 ## Codelet / tile architecture
 
-Single `GSplat` MultiVertex per IPU tile. Framebuffer is 1280×720, tiled into
-1440 pieces of 32×20 pixels, one per IPU tile. Each tile owns:
+**Two compute sets** per frame, split for worker-level parallelism:
+
+1. **RouteVertex** (`poplar::Vertex`, single-worker) — projection, Manhattan
+   routing, sorting. Runs in `routeCs`.
+2. **BlendVertex** (`poplar::MultiVertex`, 6 workers) — framebuffer clear +
+   alpha-blend, pixel rows distributed across all 6 IPU hardware threads.
+   Runs in `blendCs`.
+
+Poplar's BSP barrier between compute sets synchronises them — no software
+barrier needed. The split exists because routing modifies shared per-tile
+buffers (channel buffers, Gaussian lists) and must be single-worker, while
+pixel blending is embarrassingly parallel across rows.
+
+Framebuffer is 1280×720, tiled into 1440 pieces of 32×20 pixels, one per IPU
+tile. Each tile owns:
 
 - A slice of the framebuffer (8-bit RGBX, 4 B/pixel, **always written as
   32-bit words** via `memcpy` — individual byte writes on IPU SRAM can race
   between hardware threads).
 - An input buffer of Gaussians that are "anchored" to this screen region.
-- NEWS (north-east-west-south) channels of capacity `numPoints = 360`
+- NEWS (north-east-west-south) channels of capacity `numPoints = 400`
   Gaussians each, for routing and bloom.
 - An overflow/storage buffer.
 
-Per frame, a tile runs:
+**RouteVertex::compute()** (single-worker):
 
-1. **readInput**: pull from N/E/W/S `in` channels. If the anchor (projected
-   mean) is on this tile, store locally; otherwise forward toward the
-   anchor via Manhattan-distance routing.
-2. **renderInternal**: project all locally-held Gaussians; if their 2D
+1. `clearOutBuffers` — zero the NEWS output channels.
+2. Build `ProjParams` from modelView/projection matrices.
+3. `readInput` ×4 — pull from N/E/W/S input channels. If the anchor
+   (projected mean) is on this tile, store locally; otherwise forward toward
+   the anchor via Manhattan-distance routing.
+4. `projectAndRoute` — project all locally-held Gaussians; if their 2D
    bounding box straddles this tile, write a copy to the outgoing direction
    (bloom). Collect the visible subset into `gaus2D`.
-3. **renderTile**: sort `gaus2D` ascending by `view_z`, iterate pixels
-   (distributed across 6 workers by row), alpha-blend in front-to-back order.
+5. `sortBuffer` — sort `gaus2D` ascending by `view_z`.
+6. Write `splatted[0]` = number of visible Gaussians.
+
+**BlendVertex::compute(workerId)** (6-worker):
+
+1. Clear framebuffer — distributed across all workers.
+2. `renderTile` — iterate pixels (rows striped across workers), alpha-blend
+   `gaus2D[0..splatted[0]]` in front-to-back order.
+
+**Routing substeps**: each frame runs `routingRepeats` (default 2) iterations
+of `Execute(routeCs) → Execute(blendCs) → broadcastPoints`. Each iteration
+lets Gaussians travel one Manhattan hop. After a large view change, ~50
+substeps are needed for full convergence; with 2 substeps/frame, the scene
+visually settles over ~25 frames.
 
 All compute and all scene data stay on-tile. The only host traffic each frame
 is the view/projection matrices (down) and the assembled framebuffer (up).
+
+### Cycle-counter instrumentation
+
+RouteVertex has a `phaseCycles` output port (5 unsigned ints) that records
+`__builtin_ipu_get_scount_l()` deltas between each phase:
+`[0]` clear+setup, `[1]` routing, `[2]` projection, `[3]` sorting, `[4]` total.
+Guarded by `#ifdef __IPU__`. Host reads them back via `readbackPhaseCycles()`
+and converts to ms via `getPhaseCycleStats()` (assumes 1.85 GHz tile clock).
+Returns `CycleBreakdown` with `PhaseStats{min_ms, mean_ms, max_ms}` per phase
+across all 1440 tiles — quantifies load imbalance directly.
 
 ---
 
@@ -183,8 +224,12 @@ These **cannot be eliminated** — they're the paper's subject matter.
 
 When IPU output differs visibly from DGR at the same pose, expect:
 - **Tile-boundary-aligned holes** (channel saturation in dense regions)
-- **Blooming** (Gaussians take 1 hop/frame to propagate)
+- **Blooming** (Gaussians take 1 hop/frame to propagate; ~50 substeps to
+  converge from cold, ~25 frames at routingRepeats=2)
 - **Minor per-tile sort-order differences** (local vs global sort)
+- **Load imbalance** — the BSP barrier means every tile waits for the slowest.
+  Measured max/mean ratio: 2–5× on routing, depending on scene density
+  distribution. This is the dominant performance bottleneck.
 
 The pixel-rasterisation math is otherwise identical and verified by
 `tests/test_pipeline.cpp`.
@@ -229,7 +274,19 @@ Useful server flags:
 - `--device cpu|ipu` (default `cpu`; CPU is point-only, for debugging initial
   scene placement)
 - `--flip-up` — for scenes whose world Y is inverted; rarely needed now
+- `--flip-scene` — rotates scene 180° around X (negates Y and Z of all world
+  coords). For scenes that appear both upside-down AND facing away.
 - `--no-amp` — disables optimised AMP codelets (default: disabled)
+- `--from-pose <path.json>` — load a saved pose JSON (view matrix + FOV) as
+  starting camera. The JSON uses COLMAP convention; the server flips back to
+  OpenGL internally (self-inverse).
+- `--benchmark N` — run N substeps per zoom level headlessly with per-phase
+  timing (route/blend/exchange) and cycle-counter breakdown
+  (clear/routing/projection/sort min/mean/max). Outputs `benchmark_profile.csv`
+  + `benchmark_zoom_*.png`. Tracks convergence (total visible Gaussians per
+  substep). No `--ui-port` needed.
+- `--device-loop` — use `RepeatWhileTrue` device-side loop for IPU rendering,
+  eliminating per-frame host↔device barrier.
 - `--paired-shots-dir <dir>` — where Screenshot-button paired renders go
   (default `paired_shots/`).
 
@@ -261,6 +318,68 @@ any extra plumbing.
 The server logs the current `Dynamic view matrix` (4 lines = 4 GLM columns)
 and `fov` (HALF-FOV in radians) every few seconds. These are what you feed the
 GPU reference renderer to reproduce a pose exactly.
+
+### Benchmarking
+
+The `--benchmark N` flag runs N routing substeps at each of 4 zoom levels
+(1.0, 1.2, 1.5, 2.0), with per-phase timing and convergence tracking.
+
+```bash
+# Basic benchmark
+./build/src/main/splat --input data/scene.ply --flip-scene \
+    --from-pose tools/benchmark_pose.json --benchmark 70
+
+# With power sampling (needs GCDA_MONITOR=1)
+bash tools/benchmark_with_power.sh --input data/scene.ply --flip-scene \
+    --from-pose tools/benchmark_pose.json --benchmark 70
+
+# Plot results
+python3 tools/plot_profile.py benchmark_profile.csv
+```
+
+The benchmark first calls `gm.execute()` to initialise streams, then for each
+zoom level calls `broadcastMVP()` once, then loops N times calling
+`runSingleSubstep()` (which times route/blend/exchange individually) +
+`readbackCounts()` + `readbackPhaseCycles()`. This gives:
+- **Host-side timing**: route_ms, blend_ms, exchange_ms per substep
+- **On-tile cycle breakdown**: clear/routing/projection/sort as min/mean/max
+  across 1440 tiles (from hardware cycle counters at 1.85 GHz)
+- **Convergence**: total visible Gaussians per substep
+
+The `IpuSplatter` stores an `enginePtr` after initialisation so these methods
+can call `getPrograms().run()` directly without going through `gm.execute()`.
+
+**Named programs** registered in `build()`:
+`broadcast_mvp`, `single_route`, `single_blend`, `single_exchange`, `read_fb`,
+`read_counts`, `read_phase_cycles` — plus the original `project` (monolithic)
+and `render_loop` (device-side RepeatWhileTrue).
+
+**Power measurement**: `GCDA_MONITOR=1` must be set at launch to enable
+gc-monitor sensor access. Board power is ~30W during rendering (Mk2 C600).
+
+### Power measurement
+
+The IPU Mk2 C600 card draws ~30W board power during rendering (44k Gaussians,
+1440 tiles active, ~12 FPS). This is all on-chip — zero DRAM energy.
+
+To measure power, `GCDA_MONITOR=1` must be set when launching the application.
+Without it, `gc-monitor` shows N/A for power and temperature fields.
+
+```bash
+# Manual spot check while app is running
+GCDA_MONITOR=1 ./build/src/main/splat --input data/scene.ply --ui-port 5000 &
+gc-monitor -s   # shows Power column
+
+# Automated sampling during benchmark
+bash tools/benchmark_with_power.sh --input data/scene.ply --benchmark 70
+# → power_samples.csv + summary (mean/min/max watts)
+```
+
+`gc-monitor -s --csv-output` fields of interest: column 19 = board power (W),
+column 17 = die temp (°C), column 26 = IPU utilisation (%).
+
+For GPU comparison, `nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits -l 1`
+samples GPU power at 1 Hz.
 
 ---
 
