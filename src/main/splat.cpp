@@ -325,13 +325,17 @@ int main(int argc, char** argv) {
 
     FILE* csv = fopen("benchmark_profile.csv", "w");
     fprintf(csv, "zoom,substep,route_ms,blend_ms,exchange_ms,total_ms,mvp_ms,"
-                 "clear_cyc_ms,routing_cyc_ms,proj_cyc_ms,sort_cyc_ms,total_cyc_ms,"
+                 "clear_min,clear_mean,clear_max,"
+                 "routing_min,routing_mean,routing_max,"
+                 "proj_min,proj_mean,proj_max,"
+                 "sort_min,sort_mean,sort_max,"
+                 "total_cyc_min,total_cyc_mean,total_cyc_max,"
                  "total_visible\n");
 
-    printf("\n%-6s %6s %10s %10s %10s %10s | %8s %8s %8s %8s | %10s\n",
-           "Zoom", "Step", "Route ms", "Blend ms", "Exch ms", "Total ms",
-           "Clear", "Routing", "Project", "Sort", "Visible");
-    printf("%s\n", std::string(110, '-').c_str());
+    printf("\n%-5s %4s %9s %9s %9s | %-26s | %-26s | %-26s | %10s\n",
+           "Zoom", "Step", "Route", "Blend", "Total",
+           "  Routing min/mean/max", "  Project min/mean/max", "     Sort min/mean/max", "Visible");
+    printf("%s\n", std::string(140, '-').c_str());
 
     for (int z = 0; z < nZooms; ++z) {
       float moveBack = sceneRadius * 0.5f * (zoomLevels[z] - 1.0f);
@@ -358,28 +362,38 @@ int main(int argc, char** argv) {
         ipuSplatter->readbackPhaseCycles();
         unsigned totalVisible = ipuSplatter->getTotalSplatCount();
 
-        double cyc_clear, cyc_routing, cyc_proj, cyc_sort, cyc_total;
-        ipuSplatter->getPhaseCycleStats(cyc_clear, cyc_routing, cyc_proj, cyc_sort, cyc_total);
+        auto bd = ipuSplatter->getPhaseCycleStats();
 
         fprintf(csv, "%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                     "%.4f,%.4f,%.4f,%.4f,%.4f,%u\n",
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%u\n",
                 zoomLevels[z], s,
                 timing.route_ms, timing.blend_ms, timing.exchange_ms,
                 timing.compute_ms, (s == 0 ? mvp_ms : 0.0),
-                cyc_clear, cyc_routing, cyc_proj, cyc_sort, cyc_total,
+                bd.clear.min_ms, bd.clear.mean_ms, bd.clear.max_ms,
+                bd.routing.min_ms, bd.routing.mean_ms, bd.routing.max_ms,
+                bd.projection.min_ms, bd.projection.mean_ms, bd.projection.max_ms,
+                bd.sorting.min_ms, bd.sorting.mean_ms, bd.sorting.max_ms,
+                bd.total.min_ms, bd.total.mean_ms, bd.total.max_ms,
                 totalVisible);
 
         if (s % 5 == 0 || s < 5) {
-          printf("%-6.2f %6d %10.3f %10.3f %10.3f %10.3f | %8.3f %8.3f %8.3f %8.3f | %10u\n",
+          printf("%-5.2f %4d %9.2f %9.2f %9.2f | %7.2f/%7.2f/%7.2f | %7.2f/%7.2f/%7.2f | %7.3f/%7.3f/%7.3f | %10u\n",
                  zoomLevels[z], s,
-                 timing.route_ms, timing.blend_ms, timing.exchange_ms,
-                 timing.compute_ms,
-                 cyc_clear, cyc_routing, cyc_proj, cyc_sort,
+                 timing.route_ms, timing.blend_ms, timing.compute_ms,
+                 bd.routing.min_ms, bd.routing.mean_ms, bd.routing.max_ms,
+                 bd.projection.min_ms, bd.projection.mean_ms, bd.projection.max_ms,
+                 bd.sorting.min_ms, bd.sorting.mean_ms, bd.sorting.max_ms,
                  totalVisible);
         }
 
-        if (settledAt < 0 && s > 0 && totalVisible == prevCount) {
-          settledAt = s;
+        if (settledAt < 0 && s > 0 && prevCount > 0) {
+          double delta = std::abs((double)totalVisible - (double)prevCount) / prevCount;
+          if (delta < 0.001) settledAt = s;
         }
         prevCount = totalVisible;
       }

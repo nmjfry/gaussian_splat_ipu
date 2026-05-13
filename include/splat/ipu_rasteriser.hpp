@@ -52,9 +52,14 @@ public:
   void readbackFramebuffer();
   void readbackPhaseCycles();
   unsigned getTotalSplatCount() const;
-  void getPhaseCycleStats(double& clear_ms, double& routing_ms,
-                          double& projection_ms, double& sorting_ms,
-                          double& total_ms) const;
+
+  struct PhaseStats {
+    double min_ms, mean_ms, max_ms;
+  };
+  struct CycleBreakdown {
+    PhaseStats clear, routing, projection, sorting, total;
+  };
+  CycleBreakdown getPhaseCycleStats() const;
 
   void setDeviceLoopMode(bool enabled) { deviceLoopMode = enabled; }
   void stopDeviceLoop();

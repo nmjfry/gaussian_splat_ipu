@@ -13,9 +13,7 @@ import numpy as np
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "benchmark_profile.csv"
 
-    zooms, substeps = [], []
-    route_ms, blend_ms, exchange_ms, total_ms, total_visible = [], [], [], [], []
-    cyc_clear, cyc_routing, cyc_proj, cyc_sort = [], [], [], []
+    data = {}
 
     with open(path) as f:
         reader = csv.DictReader(f)
@@ -24,28 +22,19 @@ def main():
             print(f"Detected old CSV format ({','.join(fields)}).")
             print("Rebuild with the new benchmark code and re-run --benchmark.")
             sys.exit(1)
-        has_cycles = "clear_cyc_ms" in fields
+        has_cycles = "routing_mean" in fields
+        for key in fields:
+            data[key] = []
         for row in reader:
-            zooms.append(float(row["zoom"]))
-            substeps.append(int(row["substep"]))
-            route_ms.append(float(row["route_ms"]))
-            blend_ms.append(float(row["blend_ms"]))
-            exchange_ms.append(float(row["exchange_ms"]))
-            total_ms.append(float(row["total_ms"]))
-            total_visible.append(int(row["total_visible"]))
-            if has_cycles:
-                cyc_clear.append(float(row["clear_cyc_ms"]))
-                cyc_routing.append(float(row["routing_cyc_ms"]))
-                cyc_proj.append(float(row["proj_cyc_ms"]))
-                cyc_sort.append(float(row["sort_cyc_ms"]))
+            for key in fields:
+                data[key].append(float(row[key]))
 
-    zooms = np.array(zooms)
-    substeps = np.array(substeps)
-    route_ms = np.array(route_ms)
-    blend_ms = np.array(blend_ms)
-    exchange_ms = np.array(exchange_ms)
-    total_ms = np.array(total_ms)
-    total_visible = np.array(total_visible)
+    for key in data:
+        data[key] = np.array(data[key])
+
+    zooms = data["zoom"]
+    substeps = data["substep"].astype(int)
+    total_visible = data["total_visible"].astype(int)
 
     unique_zooms = sorted(set(zooms))
     n_zooms = len(unique_zooms)
@@ -59,12 +48,12 @@ def main():
     for i, z in enumerate(unique_zooms):
         mask = zooms == z
         s = substeps[mask]
-        ax.plot(s, route_ms[mask], '-o', markersize=3, color=colors[i],
+        ax.plot(s, data["route_ms"][mask], '-o', markersize=3, color=colors[i],
                 label=f'route (z={z:.1f})')
-        ax.plot(s, blend_ms[mask], '--s', markersize=3, color=colors[i],
+        ax.plot(s, data["blend_ms"][mask], '--s', markersize=3, color=colors[i],
                 label=f'blend (z={z:.1f})', alpha=0.7)
     ax.set_ylabel("Time (ms)")
-    ax.set_title("Host-measured phase timing (route = single CS, blend = single CS)")
+    ax.set_title("Host-measured compute set timing")
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
 
@@ -73,32 +62,34 @@ def main():
     for i, z in enumerate(unique_zooms):
         mask = zooms == z
         s = substeps[mask]
-        ax.plot(s, total_ms[mask], '-o', markersize=3, color=colors[i],
+        ax.plot(s, data["total_ms"][mask], '-o', markersize=3, color=colors[i],
                 label=f'zoom {z:.1f}')
     ax.set_ylabel("Total substep time (ms)")
     ax.set_title("Total substep time (route + blend + exchange)")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
 
-    # Plot 3: On-tile cycle breakdown (if available)
+    # Plot 3: On-tile cycle breakdown with min/max shading
     if has_cycles:
-        cyc_clear = np.array(cyc_clear)
-        cyc_routing = np.array(cyc_routing)
-        cyc_proj = np.array(cyc_proj)
-        cyc_sort = np.array(cyc_sort)
-
         ax = axes[2]
+        phase_keys = [
+            ("routing", "Routing"),
+            ("proj", "Projection"),
+            ("sort", "Sort"),
+        ]
+        linestyles = ['-o', '--s', ':^']
         for i, z in enumerate(unique_zooms):
             mask = zooms == z
             s = substeps[mask]
-            ax.plot(s, cyc_routing[mask], '-o', markersize=3, color=colors[i],
-                    label=f'routing (z={z:.1f})')
-            ax.plot(s, cyc_proj[mask], '--s', markersize=3, color=colors[i],
-                    label=f'project (z={z:.1f})', alpha=0.7)
-            ax.plot(s, cyc_sort[mask], ':^', markersize=3, color=colors[i],
-                    label=f'sort (z={z:.1f})', alpha=0.5)
+            for j, (key, label) in enumerate(phase_keys):
+                mean = data[f"{key}_mean"][mask]
+                lo = data[f"{key}_min"][mask]
+                hi = data[f"{key}_max"][mask]
+                line = ax.plot(s, mean, linestyles[j], markersize=3, color=colors[i],
+                        label=f'{label} (z={z:.1f})', alpha=0.8 - 0.2*j)
+                ax.fill_between(s, lo, hi, color=colors[i], alpha=0.08)
         ax.set_ylabel("Time (ms, from cycle counter)")
-        ax.set_title("On-tile cycle breakdown (mean across 1440 tiles, @1.85 GHz)")
+        ax.set_title("On-tile cycle breakdown — line=mean, shading=min..max across 1440 tiles")
         ax.legend(loc="upper right", fontsize=7, ncol=2)
         ax.grid(True, alpha=0.3)
 
@@ -122,19 +113,16 @@ def main():
     plt.close()
 
     # Summary table
-    hdr = (f"{'Zoom':<8} {'Route ms':>10} {'Blend ms':>10} {'Exch ms':>10} "
-           f"{'Total ms':>10} {'FPS':>8}")
-    if has_cycles:
-        hdr += f" {'Clear':>8} {'Routing':>8} {'Project':>8} {'Sort':>8}"
-    hdr += f" {'Visible':>10} {'Settled':>8}"
-    print(f"\n{hdr}")
-    print("-" * len(hdr))
+    print(f"\n{'Zoom':<6} {'Route':>8} {'Blend':>8} {'Total':>8} {'FPS':>6}"
+          f" | {'Routing':>22s} | {'Projection':>22s} | {'Sort':>22s}"
+          f" | {'Visible':>8} {'Sttl':>5}")
+    print(f"{'':6} {'':>8} {'':>8} {'':>8} {'':>6}"
+          f" | {'min/mean/max':>22s} | {'min/mean/max':>22s} | {'min/mean/max':>22s}"
+          f" | {'':>8} {'':>5}")
+    print("-" * 140)
     for z in unique_zooms:
         mask = zooms == z
-        r = route_ms[mask]
-        b = blend_ms[mask]
-        e = exchange_ms[mask]
-        t = total_ms[mask]
+        t = data["total_ms"][mask]
         v = total_visible[mask]
 
         settled = -1
@@ -143,15 +131,16 @@ def main():
                 settled = j
                 break
 
-        line = (f"{z:<8.2f} {r.mean():>10.3f} {b.mean():>10.3f} {e.mean():>10.3f} "
-                f"{t.mean():>10.3f} {1000/t.mean():>8.1f}")
+        # Use last substep values for the cycle stats
+        last = mask.nonzero()[0][-1]
+        line = (f"{z:<6.2f} {data['route_ms'][last]:>8.2f} {data['blend_ms'][last]:>8.2f} "
+                f"{data['total_ms'][last]:>8.2f} {1000/t.mean():>6.1f}")
         if has_cycles:
-            cr = cyc_routing[mask]
-            cp = cyc_proj[mask]
-            cs = cyc_sort[mask]
-            cc = cyc_clear[mask]
-            line += f" {cc.mean():>8.3f} {cr.mean():>8.3f} {cp.mean():>8.3f} {cs.mean():>8.3f}"
-        line += f" {v[-1]:>10d} {settled:>8d}"
+            for key in ["routing", "proj", "sort"]:
+                line += (f" | {data[f'{key}_min'][last]:>6.2f}/"
+                         f"{data[f'{key}_mean'][last]:>6.2f}/"
+                         f"{data[f'{key}_max'][last]:>6.2f}")
+        line += f" | {v[-1]:>8d} {settled:>5d}"
         print(line)
 
 if __name__ == "__main__":

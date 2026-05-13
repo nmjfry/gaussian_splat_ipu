@@ -500,26 +500,36 @@ void IpuSplatter::readbackPhaseCycles() {
   getPrograms().run(*enginePtr, "read_phase_cycles");
 }
 
-void IpuSplatter::getPhaseCycleStats(double& clear_ms, double& routing_ms,
-                                      double& projection_ms, double& sorting_ms,
-                                      double& total_ms) const {
+IpuSplatter::CycleBreakdown IpuSplatter::getPhaseCycleStats() const {
   const double clockGHz = 1.85;
+  const double toMs = 1.0 / (clockGHz * 1e6);
   const size_t N = 5;
   const size_t numTiles = phaseCycleData.size() / N;
+
   double sums[5] = {};
+  double mins[5], maxs[5];
+  for (size_t p = 0; p < N; ++p) {
+    mins[p] = 1e30;
+    maxs[p] = 0;
+  }
+
   for (size_t t = 0; t < numTiles; ++t) {
     for (size_t p = 0; p < N; ++p) {
-      sums[p] += phaseCycleData[t * N + p];
+      double v = phaseCycleData[t * N + p] * toMs;
+      sums[p] += v;
+      if (v < mins[p]) mins[p] = v;
+      if (v > maxs[p]) maxs[p] = v;
     }
   }
+
+  CycleBreakdown bd;
+  PhaseStats* phases[] = {&bd.clear, &bd.routing, &bd.projection, &bd.sorting, &bd.total};
   for (size_t p = 0; p < N; ++p) {
-    sums[p] = (sums[p] / numTiles) / (clockGHz * 1e6);
+    phases[p]->min_ms = mins[p];
+    phases[p]->mean_ms = sums[p] / numTiles;
+    phases[p]->max_ms = maxs[p];
   }
-  clear_ms = sums[0];
-  routing_ms = sums[1];
-  projection_ms = sums[2];
-  sorting_ms = sums[3];
-  total_ms = sums[4];
+  return bd;
 }
 
 unsigned IpuSplatter::getTotalSplatCount() const {
