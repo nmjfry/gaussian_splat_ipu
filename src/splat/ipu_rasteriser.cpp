@@ -354,14 +354,20 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   // this program sequence will copy the points between all the tiles in the graph
   program::Sequence broadcastPoints = eb.getBroadcastSequence();
 
+  // Each repeat iteration runs one full compute→exchange cycle. Gaussians
+  // travel one hop per iteration, so routingRepeats controls how many hops
+  // settle per frame. K=1 is the original behaviour. K=2-3 halves/thirds
+  // the routing spike after a view change. Compute is ~9ms and streaming
+  // is the bottleneck, so moderate K values cost little wall-clock time.
+  constexpr unsigned routingRepeats = 2;
+
+  program::Sequence substep;
+  substep.add(program::Execute(splatCs));
+  substep.add(broadcastPoints);
+
   program::Sequence main;
-  // Disable all FP exceptions + stochastic rounding for perf.
-  // Uncomment once verified against local SDK headers:
-  // popops::setFloatingPointBehaviour(vg, main,
-  //   {false, false, false, false, false}, "disable_fp_exceptions");
   main.add(broadcastMvp);
-  main.add(program::Execute(splatCs));
-  main.add(broadcastPoints);
+  main.add(program::Repeat(routingRepeats, substep));
   main.add(outputFramebuffer.buildRead(vg, true));
   main.add(counts.buildRead(vg, true));
 
