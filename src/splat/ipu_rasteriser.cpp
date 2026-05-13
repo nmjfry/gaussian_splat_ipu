@@ -357,25 +357,17 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   auto fbRead = outputFramebuffer.buildRead(vg, true);
   auto countsRead = counts.buildRead(vg, true);
 
-  program::Sequence main;
-  main.add(broadcastMvp);
-  main.add(program::Execute(splatCs));
-  main.add(broadcastPoints);
-  main.add(fbRead);
-  main.add(countsRead);
-
   program::Sequence setup;
   setup.add(inputVertices.buildWrite(vg, true));
 
-  getPrograms().add("write_verts", setup);
-  getPrograms().add("project", main);
-
-  getPrograms().add("broadcast_mvp", broadcastMvp);
-  getPrograms().add("gsplat_compute", program::Execute(splatCs));
-  getPrograms().add("news_exchange", broadcastPoints);
   program::Sequence readFb;
   readFb.add(fbRead);
   readFb.add(countsRead);
+
+  getPrograms().add("write_verts", setup);
+  getPrograms().add("broadcast_mvp", broadcastMvp);
+  getPrograms().add("gsplat_compute", program::Execute(splatCs));
+  getPrograms().add("news_exchange", broadcastPoints);
   getPrograms().add("read_fb", readFb);
 }
 
@@ -407,7 +399,10 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
     lastTiming.exchange_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
     lastTiming.readback_ms = std::chrono::duration<double, std::milli>(t4 - t3).count();
   } else {
-    getPrograms().run(engine, "project");
+    getPrograms().run(engine, "broadcast_mvp");
+    getPrograms().run(engine, "gsplat_compute");
+    getPrograms().run(engine, "news_exchange");
+    getPrograms().run(engine, "read_fb");
   }
 }
 
