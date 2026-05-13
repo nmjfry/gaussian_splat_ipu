@@ -1,5 +1,8 @@
 # 3D Gaussian Splatting on Graphcore IPUs
 
+> **Current stable branch: `cleanup`** — this is the fixed, working branch. Use it as the basis for any new work.
+> Latest commit: `fe0ef6f` (flip scene option, 2026-04-14).
+
 Experimental implementation of an alternatice to neural radiance fields: [3D Gaussian Splatting for Real-Time Radiance Field Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting) B. Kerbl and G. Kopanas, T. Leimk{\"u}hler and G. Drettakis, ACM Transactions on Graphics, July 2023.
 
 ## Which bits are a good fit for IPU?:
