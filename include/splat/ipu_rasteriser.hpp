@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <chrono>
 
 #include <ipu/ipu_utils.hpp>
 #include <glm/mat4x4.hpp>
@@ -11,6 +12,14 @@
 
 
 namespace splat {
+
+struct PhaseTiming {
+  double mvp_ms = 0;
+  double compute_ms = 0;
+  double exchange_ms = 0;
+  double readback_ms = 0;
+  double total_ms() const { return mvp_ms + compute_ms + exchange_ms + readback_ms; }
+};
 
 // Fwd decls:
 class Point3f;
@@ -30,6 +39,9 @@ public:
   void getIPUHistogram(std::vector<u_int32_t>& counts) const;
   void getProjectedPoints(std::vector<glm::vec4>& pts) const;
   void getFrameBuffer(cv::Mat &frame) const;
+
+  void setProfilingMode(bool enabled) { profilingMode = enabled; }
+  PhaseTiming getLastPhaseTiming() const { return lastTiming; }
 
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
@@ -52,6 +64,8 @@ private:
   std::vector<unsigned char> frameBuffer;
   std::atomic<bool> initialised;
   const bool disableAMPVertices;
+  bool profilingMode = false;
+  PhaseTiming lastTiming;
 };
 
 } // end of namespace splat

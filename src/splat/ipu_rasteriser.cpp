@@ -354,19 +354,29 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   // this program sequence will copy the points between all the tiles in the graph
   program::Sequence broadcastPoints = eb.getBroadcastSequence();
 
-  program::Sequence main;
-  main.add(broadcastMvp); // sends the model view and projection matrices to all tiles
-  main.add(program::Execute(splatCs)); // splats the gaussians
-  main.add(broadcastPoints); // broadcasts any misplaced gaussians to other tiles
+  auto fbRead = outputFramebuffer.buildRead(vg, true);
+  auto countsRead = counts.buildRead(vg, true);
 
-  main.add(outputFramebuffer.buildRead(vg, true));
-  main.add(counts.buildRead(vg, true));
+  program::Sequence main;
+  main.add(broadcastMvp);
+  main.add(program::Execute(splatCs));
+  main.add(broadcastPoints);
+  main.add(fbRead);
+  main.add(countsRead);
 
   program::Sequence setup;
   setup.add(inputVertices.buildWrite(vg, true));
 
   getPrograms().add("write_verts", setup);
   getPrograms().add("project", main);
+
+  getPrograms().add("broadcast_mvp", broadcastMvp);
+  getPrograms().add("gsplat_compute", program::Execute(splatCs));
+  getPrograms().add("news_exchange", broadcastPoints);
+  program::Sequence readFb;
+  readFb.add(fbRead);
+  readFb.add(countsRead);
+  getPrograms().add("read_fb", readFb);
 }
 
 void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) {
@@ -380,7 +390,25 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
     counts.connectReadStream(engine, splatCounts);
     getPrograms().run(engine, "write_verts");
   }
-  getPrograms().run(engine, "project");
+
+  if (profilingMode) {
+    using clk = std::chrono::steady_clock;
+    auto t0 = clk::now();
+    getPrograms().run(engine, "broadcast_mvp");
+    auto t1 = clk::now();
+    getPrograms().run(engine, "gsplat_compute");
+    auto t2 = clk::now();
+    getPrograms().run(engine, "news_exchange");
+    auto t3 = clk::now();
+    getPrograms().run(engine, "read_fb");
+    auto t4 = clk::now();
+    lastTiming.mvp_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    lastTiming.compute_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    lastTiming.exchange_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+    lastTiming.readback_ms = std::chrono::duration<double, std::milli>(t4 - t3).count();
+  } else {
+    getPrograms().run(engine, "project");
+  }
 }
 
 } // end of namespace splat
