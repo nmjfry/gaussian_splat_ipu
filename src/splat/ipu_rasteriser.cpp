@@ -208,7 +208,7 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   const auto includes = " -I " + glmPath + " -I " + mathPath + " -I " + otherIncludes + " -I " + tileMapping;
   ipu_utils::logger()->debug("POPC_PREFIX: {}", POPC_PREFIX);
   popops::addCodelets(vg);
-  vg.addCodelets(codeletFile, poplar::CodeletFileType::Auto, "-O3" + includes);
+  vg.addCodelets(codeletFile, poplar::CodeletFileType::Auto, "-O3 -finline-functions -funroll-loops" + includes);
 
   // Create storage for the model view projeciton matrix. Place the master copy on tile 0
   // and then broadcast from their to all other tiles before any computations.
@@ -355,6 +355,10 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   program::Sequence broadcastPoints = eb.getBroadcastSequence();
 
   program::Sequence main;
+  // Disable all FP exceptions + stochastic rounding for perf.
+  // Uncomment once verified against local SDK headers:
+  // popops::setFloatingPointBehaviour(vg, main,
+  //   {false, false, false, false, false}, "disable_fp_exceptions");
   main.add(broadcastMvp);
   main.add(program::Execute(splatCs));
   main.add(broadcastPoints);

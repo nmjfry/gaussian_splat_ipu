@@ -16,6 +16,20 @@ using namespace splat;
 #include <ipu_vector_math>
 #include <ipu_memory_intrinsics>
 #include <ipu_builtins.h>
+
+inline float ipu_exp(float x) { return __builtin_ipu_exp(x); }
+inline float ipu_max(float a, float b) { return __builtin_ipu_max(a, b); }
+inline float ipu_min(float a, float b) { return __builtin_ipu_min(a, b); }
+inline float ipu_clamp(float x, float lo, float hi) {
+  return __builtin_ipu_min(__builtin_ipu_max(x, lo), hi);
+}
+#else
+inline float ipu_exp(float x) { return expf(x); }
+inline float ipu_max(float a, float b) { return a > b ? a : b; }
+inline float ipu_min(float a, float b) { return a < b ? a : b; }
+inline float ipu_clamp(float x, float lo, float hi) {
+  return x < lo ? lo : (x > hi ? hi : x);
+}
 #endif
 
 template <typename G, typename Vec> bool insertAt(Vec &buffer, unsigned idx, const G& g) {
@@ -95,10 +109,7 @@ public:
   }
 
   static unsigned char clampToU8(float v) {
-    float c = v * 255.0f;
-    if (c < 0.0f) c = 0.0f;
-    if (c > 255.0f) c = 255.0f;
-    return (unsigned char)c;
+    return (unsigned char)ipu_clamp(v * 255.0f, 0.0f, 255.0f);
   }
 
   // Pack RGBX into a single 32-bit word to avoid byte-level
@@ -317,7 +328,7 @@ public:
             continue;
           }
 
-          float alpha = glm::min(0.99f, opacity * exp(power));
+          float alpha = ipu_min(0.99f, opacity * ipu_exp(power));
           if (alpha < 1.0f / 255.0f) {
             continue;
           }
@@ -340,25 +351,20 @@ public:
     }
   }
 
+  struct ProjParams {
+    glm::mat4 mvp;
+    glm::mat4 projmatrix;
+    glm::mat4 viewmatrix;
+    glm::vec2 tanfov;
+    glm::vec2 focal;
+  };
+
   template<typename InternalStorage> void renderInternal(InternalStorage& buffer,
-                                                         const glm::mat4& projmatrix,
-                                                         const glm::mat4& viewmatrix,
-                                                         const TiledFramebuffer& tfb, 
+                                                         const ProjParams& pp,
+                                                         const TiledFramebuffer& tfb,
                                                          const splat::Viewport& vp,
                                                          const unsigned workerId = 0u) {
     const auto tb = tfb.getTileBounds(tile_id[0]);
-    const auto mvp = projmatrix * viewmatrix;
-    // fxy[0] = half-FOV-Y in radians (halved by InterfaceServer).
-    // Compute separate tan_fov and focal for x and y (matches original 3DGS).
-    // IMPORTANT: tfb.width/height are uint16_t — cast to float BEFORE dividing
-    // or C++ does integer division and aspect collapses to 1.0, producing an
-    // fx that is wrong by a factor of (real_aspect) in each tile's Cov2D.
-    float tan_fovy = glm::tan(fxy[0]);
-    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
-    glm::vec2 tanfov(tan_fovx, tan_fovy);
-    float focal_y = float(tfb.height) / (2.f * tan_fovy);
-    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
-    glm::vec2 focal(focal_x, focal_y);
 
     auto toRender = 0u;
     for (auto i = 0; i < buffer.size(); i+=sizeof(Gaussian3D)) {
@@ -369,12 +375,12 @@ public:
         continue;
       }
 
-      auto clipSpace = mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, 1.0f);
+      auto clipSpace = pp.mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, 1.0f);
       auto projMean = vp.clipSpaceToViewport(clipSpace);
 
       // Scale used as-is (matching original 3DGS — no lambda division)
       // render and clip, send to the halo region around the current tile
-      ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tanfov.x, tanfov.y, focal.x, focal.y);
+      ivec3 cov2D = g.ComputeCov2D(pp.projmatrix, pp.viewmatrix, pp.tanfov.x, pp.tanfov.y, pp.focal.x, pp.focal.y);
       ivec2 projMean2D = {projMean.x, projMean.y};
       auto bb = Gaussian2D::BoundingBoxFromCov(projMean2D, cov2D);
       Gaussian2D g2D(projMean2D, g.colour, cov2D, clipSpace.z);
@@ -420,25 +426,12 @@ public:
 
   void readInput(poplar::Input<poplar::Vector<float>> &bufferIn,
                                     const direction& recievedFrom,
-                                    const glm::mat4& projmatrix,
-                                    const glm::mat4& viewmatrix,
+                                    const ProjParams& pp,
                                     const TiledFramebuffer& tfb,
                                     const splat::Viewport& vp) {
     // Get the boundary of the current tile's framebuffer section
     const auto tb = tfb.getTileBounds(tile_id[0]);
     const auto tbPrev = tfb.getTileBounds(tfb.getNearbyTile(tile_id[0], recievedFrom));
-
-    // Compute separate tan_fov and focal for x and y (matches original 3DGS).
-    // Cast tfb.width/height (uint16_t) to float BEFORE dividing — see the
-    // matching comment in renderInternal.
-    float tan_fovy = glm::tan(fxy[0]);
-    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
-    glm::vec2 tanfov(tan_fovx, tan_fovy);
-    float focal_y = float(tfb.height) / (2.f * tan_fovy);
-    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
-    glm::vec2 focal(focal_x, focal_y);
-
-    const auto mvp = projmatrix * viewmatrix;
 
     // Iterate over the input channel and unpack the Gaussian3D structs
     for (auto i = 0; i < bufferIn.size(); i+=sizeof(Gaussian3D)) {
@@ -451,9 +444,8 @@ public:
         continue;
       }
 
-      // project the 3D gaussian into 2D using EWA splatting algorithm
       glm::vec4 glmMean = {g.mean.x, g.mean.y, g.mean.z, 1.0f};
-      auto clipSpace = mvp * glmMean;
+      auto clipSpace = pp.mvp * glmMean;
       auto projMean = vp.clipSpaceToViewport(clipSpace);
    
       if (tb.contains(ivec2{projMean.x, projMean.y})) {
@@ -465,7 +457,7 @@ public:
 
       // Scale used as-is (matching original 3DGS — no lambda division)
 
-      ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tanfov.x, tanfov.y, focal.x, focal.y);
+      ivec3 cov2D = g.ComputeCov2D(pp.projmatrix, pp.viewmatrix, pp.tanfov.x, pp.tanfov.y, pp.focal.x, pp.focal.y);
       ivec2 projMean2D = {projMean.x, projMean.y};
       Gaussian2D g2D(projMean2D, g.colour, cov2D, clipSpace.z);
       g.scale = scale;
@@ -504,20 +496,20 @@ public:
     }
   } 
 
+  template<typename G, typename Vec> void clearGidOnly(Vec &buffer, unsigned workerId) {
+    constexpr size_t gidOffset = (sizeof(G) - sizeof(float)) / sizeof(float);
+    float zero = 0.f;
+    const auto startIndex = sizeof(G) * workerId;
+    for (auto i = startIndex; i < buffer.size(); i += sizeof(G) * numWorkers()) {
+      memcpy(&buffer[i + gidOffset], &zero, sizeof(float));
+    }
+  }
+
   void clearOutBuffers(unsigned workerId) {
-    const auto startIndex = sizeof(Gaussian3D) * workerId;
-    for (auto i = startIndex; i < rightOut.size(); i+=sizeof(Gaussian3D) * numWorkers()) {
-      evict<Gaussian3D>(rightOut, i);
-    }
-    for (auto i = startIndex; i < leftOut.size(); i+=sizeof(Gaussian3D) * numWorkers()) {
-      evict<Gaussian3D>(leftOut, i);
-    }
-    for (auto i = startIndex; i < upOut.size(); i+=sizeof(Gaussian3D) * numWorkers()) {
-      evict<Gaussian3D>(upOut, i);
-    }
-    for (auto i = startIndex; i < downOut.size(); i+=sizeof(Gaussian3D) * numWorkers()) {
-      evict<Gaussian3D>(downOut, i);
-    }
+    clearGidOnly<Gaussian3D>(rightOut, workerId);
+    clearGidOnly<Gaussian3D>(leftOut, workerId);
+    clearGidOnly<Gaussian3D>(upOut, workerId);
+    clearGidOnly<Gaussian3D>(downOut, workerId);
   }
 
 
@@ -530,7 +522,6 @@ public:
      //clear all of the out buffers:
     clearOutBuffers(workerId);
 
-    // construct mapping from tile to framebuffer
     const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
     const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
     clipSize =  12.0f;
@@ -539,12 +530,24 @@ public:
     const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
     const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
 
-    readInput(rightIn, direction::right, projmatrix, viewmatrix, tfb, vp);
-    readInput(leftIn, direction::left, projmatrix, viewmatrix, tfb, vp);
-    readInput(upIn, direction::up, projmatrix, viewmatrix, tfb, vp);
-    readInput(downIn, direction::down, projmatrix, viewmatrix, tfb, vp);
+    float tan_fovy = glm::tan(fxy[0]);
+    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
+    float focal_y = float(tfb.height) / (2.f * tan_fovy);
+    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
 
-    renderInternal(vertsIn, projmatrix, viewmatrix, tfb, vp, workerId);
+    ProjParams pp;
+    pp.mvp = projmatrix * viewmatrix;
+    pp.projmatrix = projmatrix;
+    pp.viewmatrix = viewmatrix;
+    pp.tanfov = {tan_fovx, tan_fovy};
+    pp.focal = {focal_x, focal_y};
+
+    readInput(rightIn, direction::right, pp, tfb, vp);
+    readInput(leftIn, direction::left, pp, tfb, vp);
+    readInput(upIn, direction::up, pp, tfb, vp);
+    readInput(downIn, direction::down, pp, tfb, vp);
+
+    renderInternal(vertsIn, pp, tfb, vp, workerId);
 
     return true;
   }

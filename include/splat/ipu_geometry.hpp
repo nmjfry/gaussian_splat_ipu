@@ -5,6 +5,17 @@
 #include <glm/gtc/quaternion.hpp>
 #include </home/nf20/workspace/gaussian_splat_ipu/include/math/sincos.hpp>
 
+#ifdef __IPU__
+#include <ipu_builtins.h>
+inline float geo_exp(float x) { return __builtin_ipu_exp(x); }
+inline float geo_max(float a, float b) { return __builtin_ipu_max(a, b); }
+inline float geo_min(float a, float b) { return __builtin_ipu_min(a, b); }
+#else
+inline float geo_exp(float x) { return expf(x); }
+inline float geo_max(float a, float b) { return a > b ? a : b; }
+inline float geo_min(float a, float b) { return a < b ? a : b; }
+#endif
+
 // #ifdef __IPU__
 // #else 
 //   #include <sincos.hpp>
@@ -249,19 +260,15 @@ struct Gaussian2D {
     }
   }
 
-  static float max(float a, float b) {
-    return a > b ? a : b;
-  }
-
   // Bounding-radius method from the original 3DGS: 3 standard deviations of the
   // larger eigenvalue. Static so it can be computed before constructing Gaussian2D
   // (since we only store the conic now, not the covariance).
   static Bounds2f BoundingBoxFromCov(const ivec2& mean, const ivec3& cov2D) {
     float det = cov2D.x * cov2D.z - cov2D.y * cov2D.y;
     float mid = .5f * (cov2D.x + cov2D.z);
-    float lambda1 = mid + glm::sqrt(max(0.1f, mid * mid - det));
-    float lambda2 = mid - glm::sqrt(max(0.1f, mid * mid - det));
-    float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+    float lambda1 = mid + glm::sqrt(geo_max(0.1f, mid * mid - det));
+    float lambda2 = mid - glm::sqrt(geo_max(0.1f, mid * mid - det));
+    float my_radius = ceil(3.f * sqrt(geo_max(lambda1, lambda2)));
     return Bounds2f({mean.x - my_radius, mean.y - my_radius},
                     {mean.x + my_radius, mean.y + my_radius});
   }
@@ -294,32 +301,22 @@ class Gaussian3D {
         );
 
         glm::mat3 S(1.0f);
-        S[0][0] = expf(scale.x);
-        S[1][1] = expf(scale.y);
-        S[2][2] = expf(scale.z);
+        S[0][0] = geo_exp(scale.x);
+        S[1][1] = geo_exp(scale.y);
+        S[2][2] = geo_exp(scale.z);
 
         glm::mat3 M = S * R;
         return glm::transpose(M) * M;
     }
 
-    static float max(float a, float b) {
-      return a > b ? a : b;
-    }
-
-    static float min(float a, float b) {
-      return a < b ? a : b;
-    }
-
     ivec3 ComputeCov2D(const glm::mat4& projmatrix, const glm::mat4& viewmatrix, float tan_fovx, float tan_fovy, float focal_x, float focal_y) {
-      // t must be in VIEW space (viewmatrix only, not proj*view).
-      // Using proj*view here would give clip-space coords which invalidates the Jacobian.
       glm::vec3 t = glm::vec3(viewmatrix * glm::vec4(mean.x, mean.y, mean.z, 1.0f));
       const float limx = 1.3f * tan_fovx;
       const float limy = 1.3f * tan_fovy;
       const float txtz = t.x / t.z;
       const float tytz = t.y / t.z;
-      t.x = min(limx, max(-limx, txtz)) * t.z;
-      t.y = min(limy, max(-limy, tytz)) * t.z;
+      t.x = geo_min(limx, geo_max(-limx, txtz)) * t.z;
+      t.y = geo_min(limy, geo_max(-limy, tytz)) * t.z;
 
       glm::mat3 J = glm::mat3(
         focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
