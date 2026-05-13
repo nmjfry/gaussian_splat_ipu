@@ -345,16 +345,17 @@ int main(int argc, char** argv) {
       ipuSplatter->getPhaseTimes(phTimes);
       // IPU Mk2 tile clock ~1.85 GHz (adjust if needed)
       double clockGHz = 1.85;
-      printf("\nPHASE_TIMES (mean across %d tiles, from last frame):\n", fb.numTiles);
+      const int nTiles = (int)fb.numTiles;
+      printf("\nPHASE_TIMES (mean across %d tiles, from last frame):\n", nTiles);
       for (int p = 0; p < NP; ++p) {
         double sum = 0;
         unsigned maxCycles = 0;
-        for (int t = 0; t < fb.numTiles; ++t) {
+        for (int t = 0; t < nTiles; ++t) {
           unsigned c = phTimes[t * NP + p];
           sum += c;
           if (c > maxCycles) maxCycles = c;
         }
-        double meanCycles = sum / fb.numTiles;
+        double meanCycles = sum / nTiles;
         double meanMs = meanCycles / (clockGHz * 1e6);
         double maxMs  = maxCycles / (clockGHz * 1e6);
         printf("  %-20s mean_cycles=%10.0f  mean_ms=%7.4f  max_ms=%7.4f\n",
@@ -517,11 +518,12 @@ int main(int argc, char** argv) {
           std::vector<unsigned> phTimes;
           ipuSplatter->getPhaseTimes(phTimes);
           double clockGHz = 1.85;
-          printf("PHASE_TIMES (mean across %d tiles):\n", fb.numTiles);
+          const int nTiles = (int)fb.numTiles;
+          printf("PHASE_TIMES (mean across %d tiles):\n", nTiles);
           for (int p = 0; p < NP; ++p) {
             double sum = 0;
             unsigned maxCycles = 0;
-            for (int t = 0; t < fb.numTiles; ++t) {
+            for (int t = 0; t < nTiles; ++t) {
               unsigned c = phTimes[t * NP + p];
               sum += c;
               if (c > maxCycles) maxCycles = c;
