@@ -303,7 +303,8 @@ int main(int argc, char** argv) {
   gm.prepareEngine();
 
   // --benchmark N: render N frames headlessly at 7 zoom levels and exit.
-  // Outputs per-frame CSV with phase timing to benchmark_profile.csv.
+  // Outputs per-frame CSV to benchmark_profile.csv.
+  // Uses --from-pose if provided, otherwise the default lookAt view.
   const int benchmarkFrames = args["benchmark"].as<int>();
   if (benchmarkFrames > 0) {
     static const glm::mat4 kFlip = glm::mat4(
@@ -316,16 +317,11 @@ int main(int argc, char** argv) {
     const int nZooms = sizeof(zoomLevels) / sizeof(zoomLevels[0]);
     const float sceneRadius = glm::length(bb.diagonal()) * 0.5f;
 
-    ipuSplatter->setProfilingMode(true);
-
     FILE* csv = fopen("benchmark_profile.csv", "w");
-    fprintf(csv, "frame,zoom,mvp_ms,compute_ms,exchange_ms,readback_ms,total_ms\n");
+    fprintf(csv, "frame,zoom,frame_ms\n");
 
-    printf("\n%-6s %8s %8s %10s %10s %10s %10s %10s\n",
-           "Zoom", "FPS", "ms/f", "Distance", "Compute", "Exchange", "Readback", "MVP");
-    printf("%-6s %8s %8s %10s %10s %10s %10s %10s\n",
-           "------", "--------", "--------", "----------",
-           "----------", "----------", "----------", "----------");
+    printf("\n%-6s %8s %8s %10s\n", "Zoom", "FPS", "ms/f", "Distance");
+    printf("%-6s %8s %8s %10s\n", "------", "--------", "--------", "----------");
 
     int globalFrame = 0;
     for (int z = 0; z < nZooms; ++z) {
@@ -338,33 +334,23 @@ int main(int argc, char** argv) {
       ipuSplatter->updateProjection(projection);
       ipuSplatter->updateFocalLengths(state.fov, 0.f);
 
-      double sum_compute = 0, sum_exchange = 0, sum_readback = 0, sum_mvp = 0;
+      double sum_ms = 0;
 
       for (int i = 0; i < benchmarkFrames; ++i) {
         gm.execute(*ipuSplatter);
-        auto t = ipuSplatter->getLastPhaseTiming();
+        double frame_ms = ipuSplatter->getLastPhaseTiming().compute_ms;
 
-        fprintf(csv, "%d,%.2f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-                globalFrame, zoomLevels[z],
-                t.mvp_ms, t.compute_ms, t.exchange_ms, t.readback_ms, t.total_ms());
+        fprintf(csv, "%d,%.2f,%.4f\n", globalFrame, zoomLevels[z], frame_ms);
 
-        sum_compute += t.compute_ms;
-        sum_exchange += t.exchange_ms;
-        sum_readback += t.readback_ms;
-        sum_mvp += t.mvp_ms;
+        sum_ms += frame_ms;
         globalFrame++;
       }
 
-      double avg_total = (sum_compute + sum_exchange + sum_readback + sum_mvp) / benchmarkFrames;
-      double fps = 1000.0 / avg_total;
+      double avg_ms = sum_ms / benchmarkFrames;
+      double fps = 1000.0 / avg_ms;
       float camDist = sceneRadius * 2.0f * zoomLevels[z];
 
-      printf("%-6.2f %8.2f %8.3f %10.3f %10.3f %10.3f %10.3f %10.3f\n",
-             zoomLevels[z], fps, avg_total, camDist,
-             sum_compute / benchmarkFrames,
-             sum_exchange / benchmarkFrames,
-             sum_readback / benchmarkFrames,
-             sum_mvp / benchmarkFrames);
+      printf("%-6.2f %8.2f %8.3f %10.3f\n", zoomLevels[z], fps, avg_ms, camDist);
 
       ipuSplatter->getFrameBuffer(*imagePtr);
       char fname[64];
