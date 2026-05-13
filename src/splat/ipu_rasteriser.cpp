@@ -412,8 +412,8 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
   }
 }
 
-void IpuSplatter::enablePhaseTimingReadback() {
-  readPhaseTimesEnabled = true;
+void IpuSplatter::setPhaseTimingReadback(bool enabled) {
+  readPhaseTimesEnabled = enabled;
 }
 
 } // end of namespace splat

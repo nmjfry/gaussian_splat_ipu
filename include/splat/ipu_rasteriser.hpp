@@ -31,7 +31,7 @@ public:
   void getProjectedPoints(std::vector<glm::vec4>& pts) const;
   void getFrameBuffer(cv::Mat &frame) const;
   void getPhaseTimes(std::vector<unsigned>& out) const;
-  void enablePhaseTimingReadback();
+  void setPhaseTimingReadback(bool enabled);
 
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
