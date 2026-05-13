@@ -291,18 +291,13 @@ public:
       return;
     }
     // zero the indices
-    for (auto i = 0u; i < indices.size(); ++i) {
+    for (auto i = 0u; i < indices.size() - 1; ++i) {
       indices[i] = 0;
     }
     iterativeQuickSort<G>(&buffer[0], 0, end);
   }
 
   void renderTile(const size_t numGaussians, const Bounds2f& tileBounds, const unsigned workerId = 0u) {
-
-    sortBuffer<Gaussian2D>(gaus2D, numGaussians);
-
-    // const auto startIndex = sizeof(Gaussian3D) * workerId;
-    // for (auto i = startIndex; i < rightOut.size(); i+=sizeof(Gaussian3D) * numWorkers()) {
 
     for (auto i = tileBounds.min.x ; i < tileBounds.max.x; ++i) {
       for (auto j = tileBounds.min.y  + workerId ; j < tileBounds.max.y; j+=numWorkers()) {
@@ -359,11 +354,10 @@ public:
     glm::vec2 focal;
   };
 
-  template<typename InternalStorage> void renderInternal(InternalStorage& buffer,
-                                                         const ProjParams& pp,
-                                                         const TiledFramebuffer& tfb,
-                                                         const splat::Viewport& vp,
-                                                         const unsigned workerId = 0u) {
+  template<typename InternalStorage> unsigned projectAndRoute(InternalStorage& buffer,
+                                                              const ProjParams& pp,
+                                                              const TiledFramebuffer& tfb,
+                                                              const splat::Viewport& vp) {
     const auto tb = tfb.getTileBounds(tile_id[0]);
 
     auto toRender = 0u;
@@ -418,10 +412,7 @@ public:
       }
     }
 
-    if (toRender > 0) {
-      renderTile(toRender, tb, workerId);
-      splatted[0] = toRender;
-    }
+    return toRender;
   }
 
   void readInput(poplar::Input<poplar::Vector<float>> &bufferIn,
@@ -515,39 +506,62 @@ public:
 
   bool compute(unsigned workerId) {
 
-    // zero the framebuffer
     auto black = ivec4{0.0f, 0.0f, 0.0f, 0.0f};
     colourFb(black, workerId);
-
-     //clear all of the out buffers:
     clearOutBuffers(workerId);
 
     const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
     const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
-    clipSize =  12.0f;
+    clipSize = 12.0f;
+    const auto tb = tfb.getTileBounds(tile_id[0]);
 
-    // Transpose because GLM storage order is column major:
-    const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
-    const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
+    // Barrier counter: monotonically increasing, no reset needed.
+    // sortBuffer zeros indices[0..size-2] but preserves the last element.
+    int barrierIdx = indices.size() - 1;
+    int targetCount = indices[barrierIdx] + 1;
+    unsigned numToRender = 0;
 
-    float tan_fovy = glm::tan(fxy[0]);
-    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
-    float focal_y = float(tfb.height) / (2.f * tan_fovy);
-    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
+    if (workerId == 0) {
+      const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
+      const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
 
-    ProjParams pp;
-    pp.mvp = projmatrix * viewmatrix;
-    pp.projmatrix = projmatrix;
-    pp.viewmatrix = viewmatrix;
-    pp.tanfov = {tan_fovx, tan_fovy};
-    pp.focal = {focal_x, focal_y};
+      float tan_fovy = glm::tan(fxy[0]);
+      float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
+      float focal_y = float(tfb.height) / (2.f * tan_fovy);
+      float focal_x = float(tfb.width)  / (2.f * tan_fovx);
 
-    readInput(rightIn, direction::right, pp, tfb, vp);
-    readInput(leftIn, direction::left, pp, tfb, vp);
-    readInput(upIn, direction::up, pp, tfb, vp);
-    readInput(downIn, direction::down, pp, tfb, vp);
+      ProjParams pp;
+      pp.mvp = projmatrix * viewmatrix;
+      pp.projmatrix = projmatrix;
+      pp.viewmatrix = viewmatrix;
+      pp.tanfov = {tan_fovx, tan_fovy};
+      pp.focal = {focal_x, focal_y};
 
-    renderInternal(vertsIn, pp, tfb, vp, workerId);
+      readInput(rightIn, direction::right, pp, tfb, vp);
+      readInput(leftIn, direction::left, pp, tfb, vp);
+      readInput(upIn, direction::up, pp, tfb, vp);
+      readInput(downIn, direction::down, pp, tfb, vp);
+
+      numToRender = projectAndRoute(vertsIn, pp, tfb, vp);
+
+      if (numToRender > 0) {
+        sortBuffer<Gaussian2D>(gaus2D, numToRender);
+      }
+      splatted[0] = numToRender;
+
+      asm volatile("" ::: "memory");
+      indices[barrierIdx] = targetCount;
+    } else {
+      volatile int* cnt = (volatile int*)&indices[barrierIdx];
+      while (*cnt != targetCount) {
+        asm volatile("" ::: "memory");
+      }
+      numToRender = splatted[0];
+    }
+
+    if (numToRender > 0) {
+      renderTile(numToRender, tb, workerId);
+    }
 
     return true;
   }
