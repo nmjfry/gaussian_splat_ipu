@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract per-program-step cycle counts from a Poplar profile.
+"""Extract per-step cycle counts from a Poplar profile.
 
 Usage:
     python3 tools/read_profile.py profile/ipu_utils_engine/profile.pop
@@ -7,25 +7,6 @@ Usage:
 
 import sys
 import pva
-
-def dump_attrs(obj, prefix, depth=0):
-    """Recursively print non-private attributes and their types."""
-    if depth > 2:
-        return
-    for attr in sorted(dir(obj)):
-        if attr.startswith('_'):
-            continue
-        try:
-            val = getattr(obj, attr)
-            t = type(val).__name__
-            if callable(val) and not isinstance(val, (int, float, str, bool)):
-                print(f"  {'  '*depth}{prefix}.{attr} -> {t} (callable)")
-            elif t in ('int', 'float', 'str', 'bool'):
-                print(f"  {'  '*depth}{prefix}.{attr} = {val}")
-            else:
-                print(f"  {'  '*depth}{prefix}.{attr} -> {t}")
-        except Exception as e:
-            print(f"  {'  '*depth}{prefix}.{attr} -> ERROR: {e}")
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "profile/ipu_utils_engine/profile.pop"
@@ -36,134 +17,78 @@ def main():
     clock_hz = target.clockFrequency
     print(f"Target: {target.numTiles} tiles, {clock_hz/1e6:.0f} MHz tile clock")
 
-    # Total execution cycles
-    try:
-        total = report.execution.totalCycles
-        print(f"Total execution cycles: {total:,} ({total/clock_hz*1000:.4f} ms)")
-    except Exception as e:
-        print(f"(totalCycles unavailable: {e})")
+    # Per-step cycle breakdown
+    print(f"\n{'Step':>4} {'Type':<25} {'Max Cycles':>12} {'ms':>10} {'Mean Cycles':>12} {'ms':>10}")
+    print("-" * 80)
 
-    # Explore execution.steps
-    print(f"\n=== Execution Steps ===")
-    try:
-        for i, step in enumerate(report.execution.steps):
-            name = getattr(step, 'name', f'step_{i}')
-            print(f"\n  Step {i}: {name}")
-            for attr in sorted(dir(step)):
-                if attr.startswith('_'):
-                    continue
-                try:
-                    val = getattr(step, attr)
-                    t = type(val).__name__
-                    if t in ('int', 'float', 'str', 'bool'):
-                        if t == 'float' and 'cycle' in attr.lower():
-                            print(f"    {attr} = {val:,.0f} ({val/clock_hz*1000:.4f} ms)")
-                        else:
-                            print(f"    {attr} = {val}")
-                    else:
-                        print(f"    {attr} -> {t}")
-                except Exception as e:
-                    print(f"    {attr} -> ERROR: {e}")
-            if i > 20:
-                print("  ... (truncated)")
-                break
-    except Exception as e:
-        print(f"(steps unavailable: {e})")
+    total_max = 0
+    for i, step in enumerate(report.execution.steps):
+        prog_type = type(step.program).__name__
+        cycles = list(step.cyclesByTile)
+        if not cycles:
+            continue
+        max_c = max(cycles)
+        mean_c = sum(cycles) / len(cycles) if cycles else 0
+        total_max += max_c
+        max_ms = max_c / clock_hz * 1000
+        mean_ms = mean_c / clock_hz * 1000
 
-    # Explore execution.runs
-    print(f"\n=== Execution Runs ===")
-    try:
-        for i, run in enumerate(report.execution.runs):
-            name = getattr(run, 'name', f'run_{i}')
-            print(f"\n  Run {i}: {name}")
-            for attr in sorted(dir(run)):
-                if attr.startswith('_'):
-                    continue
-                try:
-                    val = getattr(run, attr)
-                    t = type(val).__name__
-                    if t in ('int', 'float', 'str', 'bool'):
-                        print(f"    {attr} = {val}")
-                    else:
-                        print(f"    {attr} -> {t}")
-                except Exception as e:
-                    print(f"    {attr} -> ERROR: {e}")
-            if i > 5:
-                print("  ... (truncated)")
-                break
-    except Exception as e:
-        print(f"(runs unavailable: {e})")
+        # Try to get program name
+        prog_name = ""
+        try:
+            prog_name = step.program.name
+        except:
+            pass
+        label = f"{prog_type}"
+        if prog_name:
+            label = f"{prog_type}({prog_name})"
+        if len(label) > 25:
+            label = label[:22] + "..."
 
-    # Explore execution.blocks
-    print(f"\n=== Execution Blocks ===")
-    try:
-        for i, block in enumerate(report.execution.blocks):
-            name = getattr(block, 'name', f'block_{i}')
-            print(f"\n  Block {i}: {name}")
-            for attr in sorted(dir(block)):
-                if attr.startswith('_'):
-                    continue
-                try:
-                    val = getattr(block, attr)
-                    t = type(val).__name__
-                    if t in ('int', 'float', 'str', 'bool'):
-                        if 'cycle' in attr.lower():
-                            print(f"    {attr} = {val:,.0f} ({float(val)/clock_hz*1000:.4f} ms)")
-                        else:
-                            print(f"    {attr} = {val}")
-                    else:
-                        print(f"    {attr} -> {t}")
-                except Exception as e:
-                    print(f"    {attr} -> ERROR: {e}")
-            if i > 20:
-                print("  ... (truncated)")
-                break
-    except Exception as e:
-        print(f"(blocks unavailable: {e})")
+        print(f"{i:>4} {label:<25} {max_c:>12,} {max_ms:>10.4f} {mean_c:>12,.0f} {mean_ms:>10.4f}")
 
-    # Compute sets with cycle info
-    print(f"\n=== Compute Sets ===")
-    try:
-        for cs in report.compilation.computeSets:
-            name = str(cs.name) if hasattr(cs, 'name') else str(cs)
-            print(f"\n  {name}:")
-            for attr in sorted(dir(cs)):
-                if attr.startswith('_'):
-                    continue
-                try:
-                    val = getattr(cs, attr)
-                    t = type(val).__name__
-                    if t in ('int', 'float', 'str', 'bool'):
-                        print(f"    {attr} = {val}")
-                    else:
-                        print(f"    {attr} -> {t}")
-                except Exception as e:
-                    print(f"    {attr} -> ERROR: {e}")
-    except Exception as e:
-        print(f"(compute sets unavailable: {e})")
+    print(f"\n{'Total (sum of max)':>30}: {total_max:>12,} {total_max/clock_hz*1000:>10.4f} ms")
 
-    # Programs with cycle info
-    print(f"\n=== Programs (with names) ===")
-    try:
-        for prog in report.compilation.programs:
-            name = str(prog.name) if hasattr(prog, 'name') else str(prog)
-            if not name.strip():
-                continue
-            print(f"\n  {name}:")
-            for attr in sorted(dir(prog)):
-                if attr.startswith('_'):
-                    continue
-                try:
-                    val = getattr(prog, attr)
-                    t = type(val).__name__
-                    if t in ('int', 'float', 'str', 'bool'):
-                        print(f"    {attr} = {val}")
-                    else:
-                        print(f"    {attr} -> {t}")
-                except Exception as e:
-                    print(f"    {attr} -> ERROR: {e}")
-    except Exception as e:
-        print(f"(programs unavailable: {e})")
+    # Per-run breakdown (each run = one frame in benchmark)
+    print(f"\n=== Runs (frames) ===")
+    for i, run in enumerate(report.execution.runs):
+        try:
+            ipu_cycles = list(run.cyclesByIpu)
+            if ipu_cycles:
+                max_c = max(ipu_cycles)
+                print(f"  Run {i}: {max_c:,} cycles ({max_c/clock_hz*1000:.4f} ms)")
+        except Exception as e:
+            print(f"  Run {i}: {e}")
+        if i > 10:
+            remaining = len(list(report.execution.runs)) - i - 1
+            if remaining > 0:
+                print(f"  ... ({remaining} more runs)")
+            break
+
+    # Compute set estimated cycles
+    print(f"\n=== Compute Sets (estimated cycles) ===")
+    for cs in report.compilation.computeSets:
+        name = cs.name
+        est = list(cs.estimatedCyclesByTile)
+        if est:
+            max_c = max(est)
+            mean_c = sum(est) / len(est)
+            print(f"  {name:<60} max={max_c:>10,} ({max_c/clock_hz*1000:.4f} ms)  mean={mean_c:>10,.0f}")
+        else:
+            print(f"  {name}: no estimated cycles")
+
+    # Programs with estimated cycles
+    print(f"\n=== Programs with estimated cycles ===")
+    for prog in report.compilation.programs:
+        name = prog.name
+        if not name.strip():
+            continue
+        est = getattr(prog, 'estimatedCyclesByTile', None)
+        if est is not None:
+            est = list(est)
+            if est and max(est) > 0:
+                max_c = max(est)
+                print(f"  {name:<60} max={max_c:>10,} ({max_c/clock_hz*1000:.4f} ms)")
 
 if __name__ == "__main__":
     main()
