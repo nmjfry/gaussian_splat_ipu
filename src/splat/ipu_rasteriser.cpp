@@ -382,13 +382,16 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
 
   main.add(outputFramebuffer.buildRead(vg, true));
   main.add(counts.buildRead(vg, true));
-  main.add(phaseTimesStream.buildRead(vg, true));
+
+  program::Sequence readPhaseTimes;
+  readPhaseTimes.add(phaseTimesStream.buildRead(vg, true));
 
   program::Sequence setup;
   setup.add(inputVertices.buildWrite(vg, true));
 
   getPrograms().add("write_verts", setup);
   getPrograms().add("project", main);
+  getPrograms().add("read_phase_times", readPhaseTimes);
 }
 
 void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) {
@@ -404,6 +407,13 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
     getPrograms().run(engine, "write_verts");
   }
   getPrograms().run(engine, "project");
+  if (readPhaseTimesEnabled) {
+    getPrograms().run(engine, "read_phase_times");
+  }
+}
+
+void IpuSplatter::enablePhaseTimingReadback() {
+  readPhaseTimesEnabled = true;
 }
 
 } // end of namespace splat

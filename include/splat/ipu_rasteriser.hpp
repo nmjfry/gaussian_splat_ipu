@@ -31,6 +31,7 @@ public:
   void getProjectedPoints(std::vector<glm::vec4>& pts) const;
   void getFrameBuffer(cv::Mat &frame) const;
   void getPhaseTimes(std::vector<unsigned>& out) const;
+  void enablePhaseTimingReadback();
 
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
@@ -54,7 +55,8 @@ private:
   TiledFramebuffer fbMapping;
   std::vector<unsigned char> frameBuffer;
   std::atomic<bool> initialised;
-  const bool disableAMPVertices; 
+  bool readPhaseTimesEnabled = false;
+  const bool disableAMPVertices;
 };
 
 } // end of namespace splat

@@ -316,6 +316,7 @@ int main(int argc, char** argv) {
     ipuSplatter->updateModelView(benchView);
     ipuSplatter->updateProjection(projection);
     ipuSplatter->updateFocalLengths(state.fov, 0.f);
+    ipuSplatter->enablePhaseTimingReadback();
 
     // Warm-up
     for (int i = 0; i < 5; ++i) {
