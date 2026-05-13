@@ -20,7 +20,7 @@ namespace splat {
 
 IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
   : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"),
-    counts("splat_counts"), phaseTimesStream("phase_times"),
+    counts("splat_counts"),
     hostModelView(16),
     hostProjection(16),
     fxyHost(2),
@@ -40,13 +40,11 @@ IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
   printf("Fb size: %luB\n", frameBuffer.size());
 
   splatCounts.resize(fb.numTiles, 0);
-  static constexpr size_t NUM_PHASES = 5;
-  phaseTimeData.resize(fb.numTiles * NUM_PHASES, 0);
 }
 
 IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAMP)
   : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"),
-    counts("splat_counts"), phaseTimesStream("phase_times"),
+    counts("splat_counts"),
     hostModelView(16),
     hostProjection(16),
     fxyHost(2),
@@ -72,9 +70,6 @@ IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAM
   for (auto& c : splatCounts) {
     c = 0;
   }
-
-  static constexpr size_t NUM_PHASES = 5;
-  phaseTimeData.resize(fb.numTiles * NUM_PHASES, 0);
 }
 
 
@@ -98,10 +93,6 @@ void IpuSplatter::updateProjection(const glm::mat4& mp) {
 
 void IpuSplatter::getIPUHistogram(std::vector<u_int32_t>& counts) const {
   counts = splatCounts;
-}
-
-void IpuSplatter::getPhaseTimes(std::vector<unsigned>& out) const {
-  out = phaseTimeData;
 }
 
 void IpuSplatter::updateFocalLengths(float fx, float fy) {
@@ -297,28 +288,18 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   applyTileMapping(vg, splatCounts, counterInfo);
   counts = splatCounts.slice(0, fbMapping.numTiles);
 
-  static constexpr size_t NUM_PHASES = 5;
-  const auto phaseTimeTensor = vg.addVariable(poplar::UNSIGNED_INT,
-      {(size_t)fbMapping.numTiles * NUM_PHASES}, "phase_times");
-  MappingInfo ptInfo = {0, NUM_PHASES, (size_t) fbMapping.numTiles};
-  applyTileMapping(vg, phaseTimeTensor, ptInfo);
-  phaseTimesStream = phaseTimeTensor.slice(0, fbMapping.numTiles * NUM_PHASES);
-
-
   std::vector<poplar::VertexRef> vertices;
   // Get the tile mapping and connect the vertices:
   const auto tm = vg.getTileMapping(paddedInput);
   const auto tmFb = vg.getTileMapping(paddedFramebuffer);
   const auto tmIndices = vg.getTileMapping(indices);
   const auto tmCounts = vg.getTileMapping(splatCounts);
-  const auto tmPhaseTimes = vg.getTileMapping(phaseTimeTensor);
 
   for (auto t = 0u; t < tm.size(); ++t) {
     const auto& m = tm[t];
     const auto& mFb = tmFb[t];
     const auto& mIndices = tmIndices[t];
     const auto& mCounts = tmCounts[t];
-    const auto& mPT = tmPhaseTimes[t];
     if (m.size() > 1u) {
       throw std::runtime_error("Expected fb to be stored as a single contiguous region per tile.");
     }
@@ -363,8 +344,6 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
       vg.connect(v["fxy"], localFxy);
       vg.connect(v["tile_id"], tid);
       vg.connect(v["splatted"], counter);
-      auto phaseSlice = phaseTimeTensor.slice(mPT.front());
-      vg.connect(v["phaseTimes"], phaseSlice);
       vertices.push_back(v);
     }
   }
@@ -383,15 +362,11 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   main.add(outputFramebuffer.buildRead(vg, true));
   main.add(counts.buildRead(vg, true));
 
-  program::Sequence readPhaseTimes;
-  readPhaseTimes.add(phaseTimesStream.buildRead(vg, true));
-
   program::Sequence setup;
   setup.add(inputVertices.buildWrite(vg, true));
 
   getPrograms().add("write_verts", setup);
   getPrograms().add("project", main);
-  getPrograms().add("read_phase_times", readPhaseTimes);
 }
 
 void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) {
@@ -403,17 +378,9 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
     inputVertices.connectWriteStream(engine, hostVertices);
     outputFramebuffer.connectReadStream(engine, frameBuffer);
     counts.connectReadStream(engine, splatCounts);
-    phaseTimesStream.connectReadStream(engine, phaseTimeData);
     getPrograms().run(engine, "write_verts");
   }
   getPrograms().run(engine, "project");
-  if (readPhaseTimesEnabled) {
-    getPrograms().run(engine, "read_phase_times");
-  }
-}
-
-void IpuSplatter::setPhaseTimingReadback(bool enabled) {
-  readPhaseTimesEnabled = enabled;
 }
 
 } // end of namespace splat

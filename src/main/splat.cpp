@@ -316,7 +316,6 @@ int main(int argc, char** argv) {
     ipuSplatter->updateModelView(benchView);
     ipuSplatter->updateProjection(projection);
     ipuSplatter->updateFocalLengths(state.fov, 0.f);
-    ipuSplatter->setPhaseTimingReadback(true);
 
     // Warm-up
     for (int i = 0; i < 5; ++i) {
@@ -333,35 +332,6 @@ int main(int argc, char** argv) {
 
     printf("BENCHMARK: frames=%d total_sec=%.4f fps=%.2f ms_per_frame=%.3f\n",
            benchmarkFrames, secs, fps, 1000.0 * secs / benchmarkFrames);
-
-    // Report per-phase cycle counts from the last frame
-    {
-      static constexpr int NP = 5;
-      static const char* phaseNames[] = {
-        "colourFb", "clearOutBuffers", "readInput_x4",
-        "renderInternal", "total"
-      };
-      std::vector<unsigned> phTimes;
-      ipuSplatter->getPhaseTimes(phTimes);
-      // IPU Mk2 tile clock ~1.85 GHz (adjust if needed)
-      double clockGHz = 1.85;
-      const int nTiles = (int)fb.numTiles;
-      printf("\nPHASE_TIMES (mean across %d tiles, from last frame):\n", nTiles);
-      for (int p = 0; p < NP; ++p) {
-        double sum = 0;
-        unsigned maxCycles = 0;
-        for (int t = 0; t < nTiles; ++t) {
-          unsigned c = phTimes[t * NP + p];
-          sum += c;
-          if (c > maxCycles) maxCycles = c;
-        }
-        double meanCycles = sum / nTiles;
-        double meanMs = meanCycles / (clockGHz * 1e6);
-        double maxMs  = maxCycles / (clockGHz * 1e6);
-        printf("  %-20s mean_cycles=%10.0f  mean_ms=%7.4f  max_ms=%7.4f\n",
-               phaseNames[p], meanCycles, meanMs, maxMs);
-      }
-    }
 
     ipuSplatter->getFrameBuffer(*imagePtr);
     cv::imwrite("benchmark_frame.png", *imagePtr);

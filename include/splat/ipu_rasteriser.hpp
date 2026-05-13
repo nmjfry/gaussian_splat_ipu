@@ -30,8 +30,6 @@ public:
   void getIPUHistogram(std::vector<u_int32_t>& counts) const;
   void getProjectedPoints(std::vector<glm::vec4>& pts) const;
   void getFrameBuffer(cv::Mat &frame) const;
-  void getPhaseTimes(std::vector<unsigned>& out) const;
-  void setPhaseTimingReadback(bool enabled);
 
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
@@ -43,19 +41,16 @@ private:
   ipu_utils::StreamableTensor inputVertices;
   ipu_utils::StreamableTensor outputFramebuffer;
   ipu_utils::StreamableTensor counts;
-  ipu_utils::StreamableTensor phaseTimesStream;
   ipu_utils::StreamableTensor fxy;
 
   std::vector<float> hostModelView;
   std::vector<float> hostProjection;
   std::vector<float> hostVertices;
   std::vector<unsigned> splatCounts;
-  std::vector<unsigned> phaseTimeData;
   std::vector<float> fxyHost;
   TiledFramebuffer fbMapping;
   std::vector<unsigned char> frameBuffer;
   std::atomic<bool> initialised;
-  bool readPhaseTimesEnabled = false;
   const bool disableAMPVertices;
 };
 
