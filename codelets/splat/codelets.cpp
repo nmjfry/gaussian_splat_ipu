@@ -94,6 +94,7 @@ public:
   poplar::Input<poplar::Vector<int>> tile_id;
   poplar::Input<poplar::Vector<float>> fxy;
   poplar::Output<poplar::Vector<unsigned>> splatted;
+  poplar::Output<poplar::Vector<unsigned>> phaseCycles;
 
   poplar::InOut<poplar::Vector<float>> vertsIn;
   poplar::Output<poplar::Vector<int>> indices;
@@ -407,13 +408,16 @@ public:
   }
 
   bool compute() {
+#ifdef __IPU__
+    unsigned cyc0 = __builtin_ipu_get_scount_l();
+#endif
+
     clearOutBuffers();
 
     const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
     const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
     clipSize = 12.0f;
 
-    // Transpose because GLM storage order is column major:
     const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
     const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
 
@@ -429,17 +433,38 @@ public:
     pp.tanfov = {tan_fovx, tan_fovy};
     pp.focal = {focal_x, focal_y};
 
+#ifdef __IPU__
+    unsigned cyc1 = __builtin_ipu_get_scount_l();
+#endif
+
     readInput(rightIn, direction::right, pp, tfb, vp);
     readInput(leftIn, direction::left, pp, tfb, vp);
     readInput(upIn, direction::up, pp, tfb, vp);
     readInput(downIn, direction::down, pp, tfb, vp);
 
+#ifdef __IPU__
+    unsigned cyc2 = __builtin_ipu_get_scount_l();
+#endif
+
     unsigned numToRender = projectAndRoute(vertsIn, pp, tfb, vp);
+
+#ifdef __IPU__
+    unsigned cyc3 = __builtin_ipu_get_scount_l();
+#endif
 
     if (numToRender > 0) {
       sortBuffer<Gaussian2D>(gaus2D, numToRender);
     }
     splatted[0] = numToRender;
+
+#ifdef __IPU__
+    unsigned cyc4 = __builtin_ipu_get_scount_l();
+    phaseCycles[0] = cyc1 - cyc0; // clear + setup
+    phaseCycles[1] = cyc2 - cyc1; // routing (readInput x4)
+    phaseCycles[2] = cyc3 - cyc2; // projection (projectAndRoute)
+    phaseCycles[3] = cyc4 - cyc3; // sorting
+    phaseCycles[4] = cyc4 - cyc0; // total
+#endif
 
     return true;
   }

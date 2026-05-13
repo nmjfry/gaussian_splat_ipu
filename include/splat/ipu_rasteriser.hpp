@@ -50,7 +50,11 @@ public:
   PhaseTiming runSingleSubstep();
   void readbackCounts();
   void readbackFramebuffer();
+  void readbackPhaseCycles();
   unsigned getTotalSplatCount() const;
+  void getPhaseCycleStats(double& clear_ms, double& routing_ms,
+                          double& projection_ms, double& sorting_ms,
+                          double& total_ms) const;
 
   void setDeviceLoopMode(bool enabled) { deviceLoopMode = enabled; }
   void stopDeviceLoop();
@@ -68,6 +72,7 @@ private:
   ipu_utils::StreamableTensor counts;
   ipu_utils::StreamableTensor fxy;
   ipu_utils::StreamableTensor continueFlag;
+  ipu_utils::StreamableTensor phaseCyclesStream;
 
   std::vector<float> hostModelView;
   std::vector<float> hostProjection;
@@ -75,6 +80,7 @@ private:
   std::vector<unsigned> splatCounts;
   std::vector<float> fxyHost;
   std::vector<int32_t> hostContinueFlag;
+  std::vector<unsigned> phaseCycleData;
   TiledFramebuffer fbMapping;
   std::vector<unsigned char> frameBuffer;
   std::atomic<bool> initialised;

@@ -21,6 +21,7 @@ namespace splat {
 IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
   : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"),
     counts("splat_counts"), continueFlag("continue_flag"),
+    phaseCyclesStream("phase_cycles"),
     hostModelView(16),
     hostProjection(16),
     fxyHost(2),
@@ -41,11 +42,13 @@ IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
   printf("Fb size: %luB\n", frameBuffer.size());
 
   splatCounts.resize(fb.numTiles, 0);
+  phaseCycleData.resize(fb.numTiles * 5, 0);
 }
 
 IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAMP)
   : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"),
     counts("splat_counts"), continueFlag("continue_flag"),
+    phaseCyclesStream("phase_cycles"),
     hostModelView(16),
     hostProjection(16),
     fxyHost(2),
@@ -72,6 +75,7 @@ IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAM
   for (auto& c : splatCounts) {
     c = 0;
   }
+  phaseCycleData.resize(fb.numTiles * 5, 0);
 }
 
 
@@ -291,6 +295,12 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   applyTileMapping(vg, splatCounts, counterInfo);
   counts = splatCounts.slice(0, fbMapping.numTiles);
 
+  const size_t NUM_PHASES = 5;
+  auto phaseCycleTensor = vg.addVariable(poplar::UNSIGNED_INT, {(size_t)fbMapping.numTiles * NUM_PHASES}, "phase_cycles");
+  MappingInfo phaseInfo = {0, NUM_PHASES, (size_t)fbMapping.numTiles};
+  applyTileMapping(vg, phaseCycleTensor, phaseInfo);
+  phaseCyclesStream = phaseCycleTensor;
+
   std::vector<poplar::VertexRef> vertices;
   // Get the tile mapping and connect the vertices:
   const auto tm = vg.getTileMapping(paddedInput);
@@ -346,6 +356,7 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
       vg.connect(rv["fxy"], localFxy);
       vg.connect(rv["tile_id"], tid);
       vg.connect(rv["splatted"], counter);
+      vg.connect(rv["phaseCycles"], phaseCycleTensor.slice(t * NUM_PHASES, (t + 1) * NUM_PHASES));
       vertices.push_back(rv);
 
       auto bv = vg.addVertex(blendCs, "BlendVertex");
@@ -377,12 +388,14 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
 
   auto readFb = outputFramebuffer.buildRead(vg, true);
   auto readCounts = counts.buildRead(vg, true);
+  auto readPhaseCycles = phaseCyclesStream.buildRead(vg, true);
 
   program::Sequence main;
   main.add(broadcastMvp);
   main.add(program::Repeat(routingRepeats, substep));
   main.add(readFb);
   main.add(readCounts);
+  main.add(readPhaseCycles);
 
   // Device-side render loop: runs on-device until host sets flag to 0.
   // Eliminates per-frame host↔device engine.run() barrier.
@@ -397,6 +410,7 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   frameBody.add(program::Repeat(routingRepeats, substep));
   frameBody.add(readFb);
   frameBody.add(readCounts);
+  frameBody.add(readPhaseCycles);
 
   program::Sequence setup;
   setup.add(inputVertices.buildWrite(vg, true));
@@ -412,6 +426,7 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   getPrograms().add("single_exchange", broadcastPoints);
   getPrograms().add("read_fb", readFb);
   getPrograms().add("read_counts", readCounts);
+  getPrograms().add("read_phase_cycles", readPhaseCycles);
 }
 
 void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) {
@@ -425,6 +440,7 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
     outputFramebuffer.connectReadStream(engine, frameBuffer);
     counts.connectReadStream(engine, splatCounts);
     continueFlag.connectWriteStream(engine, hostContinueFlag);
+    phaseCyclesStream.connectReadStream(engine, phaseCycleData);
     getPrograms().run(engine, "write_verts");
   }
 
@@ -478,6 +494,32 @@ void IpuSplatter::readbackCounts() {
 
 void IpuSplatter::readbackFramebuffer() {
   getPrograms().run(*enginePtr, "read_fb");
+}
+
+void IpuSplatter::readbackPhaseCycles() {
+  getPrograms().run(*enginePtr, "read_phase_cycles");
+}
+
+void IpuSplatter::getPhaseCycleStats(double& clear_ms, double& routing_ms,
+                                      double& projection_ms, double& sorting_ms,
+                                      double& total_ms) const {
+  const double clockGHz = 1.85;
+  const size_t N = 5;
+  const size_t numTiles = phaseCycleData.size() / N;
+  double sums[5] = {};
+  for (size_t t = 0; t < numTiles; ++t) {
+    for (size_t p = 0; p < N; ++p) {
+      sums[p] += phaseCycleData[t * N + p];
+    }
+  }
+  for (size_t p = 0; p < N; ++p) {
+    sums[p] = (sums[p] / numTiles) / (clockGHz * 1e6);
+  }
+  clear_ms = sums[0];
+  routing_ms = sums[1];
+  projection_ms = sums[2];
+  sorting_ms = sums[3];
+  total_ms = sums[4];
 }
 
 unsigned IpuSplatter::getTotalSplatCount() const {

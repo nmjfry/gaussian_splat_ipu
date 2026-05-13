@@ -324,11 +324,14 @@ int main(int argc, char** argv) {
     const float sceneRadius = glm::length(bb.diagonal()) * 0.5f;
 
     FILE* csv = fopen("benchmark_profile.csv", "w");
-    fprintf(csv, "zoom,substep,route_ms,blend_ms,exchange_ms,total_ms,mvp_ms,total_visible\n");
+    fprintf(csv, "zoom,substep,route_ms,blend_ms,exchange_ms,total_ms,mvp_ms,"
+                 "clear_cyc_ms,routing_cyc_ms,proj_cyc_ms,sort_cyc_ms,total_cyc_ms,"
+                 "total_visible\n");
 
-    printf("\n%-6s %6s %10s %10s %10s %10s %10s %12s\n",
-           "Zoom", "Step", "Route ms", "Blend ms", "Exch ms", "Total ms", "MVP ms", "Visible");
-    printf("%s\n", std::string(80, '-').c_str());
+    printf("\n%-6s %6s %10s %10s %10s %10s | %8s %8s %8s %8s | %10s\n",
+           "Zoom", "Step", "Route ms", "Blend ms", "Exch ms", "Total ms",
+           "Clear", "Routing", "Project", "Sort", "Visible");
+    printf("%s\n", std::string(110, '-').c_str());
 
     for (int z = 0; z < nZooms; ++z) {
       float moveBack = sceneRadius * 0.5f * (zoomLevels[z] - 1.0f);
@@ -352,18 +355,27 @@ int main(int argc, char** argv) {
       for (int s = 0; s < benchmarkSubsteps; ++s) {
         auto timing = ipuSplatter->runSingleSubstep();
         ipuSplatter->readbackCounts();
+        ipuSplatter->readbackPhaseCycles();
         unsigned totalVisible = ipuSplatter->getTotalSplatCount();
 
-        fprintf(csv, "%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%u\n",
+        double cyc_clear, cyc_routing, cyc_proj, cyc_sort, cyc_total;
+        ipuSplatter->getPhaseCycleStats(cyc_clear, cyc_routing, cyc_proj, cyc_sort, cyc_total);
+
+        fprintf(csv, "%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,%.4f,%.4f,%u\n",
                 zoomLevels[z], s,
                 timing.route_ms, timing.blend_ms, timing.exchange_ms,
-                timing.compute_ms, (s == 0 ? mvp_ms : 0.0), totalVisible);
+                timing.compute_ms, (s == 0 ? mvp_ms : 0.0),
+                cyc_clear, cyc_routing, cyc_proj, cyc_sort, cyc_total,
+                totalVisible);
 
         if (s % 5 == 0 || s < 5) {
-          printf("%-6.2f %6d %10.3f %10.3f %10.3f %10.3f %10.3f %12u\n",
+          printf("%-6.2f %6d %10.3f %10.3f %10.3f %10.3f | %8.3f %8.3f %8.3f %8.3f | %10u\n",
                  zoomLevels[z], s,
                  timing.route_ms, timing.blend_ms, timing.exchange_ms,
-                 timing.compute_ms, (s == 0 ? mvp_ms : 0.0), totalVisible);
+                 timing.compute_ms,
+                 cyc_clear, cyc_routing, cyc_proj, cyc_sort,
+                 totalVisible);
         }
 
         if (settledAt < 0 && s > 0 && totalVisible == prevCount) {

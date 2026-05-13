@@ -15,15 +15,16 @@ def main():
 
     zooms, substeps = [], []
     route_ms, blend_ms, exchange_ms, total_ms, total_visible = [], [], [], [], []
+    cyc_clear, cyc_routing, cyc_proj, cyc_sort = [], [], [], []
 
     with open(path) as f:
         reader = csv.DictReader(f)
         fields = reader.fieldnames
-        # Detect old format: frame,zoom,frame_ms
         if "substep" not in fields and "frame" in fields:
             print(f"Detected old CSV format ({','.join(fields)}).")
             print("Rebuild with the new benchmark code and re-run --benchmark.")
             sys.exit(1)
+        has_cycles = "clear_cyc_ms" in fields
         for row in reader:
             zooms.append(float(row["zoom"]))
             substeps.append(int(row["substep"]))
@@ -32,6 +33,11 @@ def main():
             exchange_ms.append(float(row["exchange_ms"]))
             total_ms.append(float(row["total_ms"]))
             total_visible.append(int(row["total_visible"]))
+            if has_cycles:
+                cyc_clear.append(float(row["clear_cyc_ms"]))
+                cyc_routing.append(float(row["routing_cyc_ms"]))
+                cyc_proj.append(float(row["proj_cyc_ms"]))
+                cyc_sort.append(float(row["sort_cyc_ms"]))
 
     zooms = np.array(zooms)
     substeps = np.array(substeps)
@@ -43,24 +49,22 @@ def main():
 
     unique_zooms = sorted(set(zooms))
     n_zooms = len(unique_zooms)
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
-
     colors = plt.cm.tab10(np.linspace(0, 1, max(n_zooms, 2)))
 
-    # Plot 1: Stacked phase timing per substep
+    n_plots = 4 if has_cycles else 3
+    fig, axes = plt.subplots(n_plots, 1, figsize=(14, 4 * n_plots))
+
+    # Plot 1: Host-side per-phase timing
     ax = axes[0]
     for i, z in enumerate(unique_zooms):
         mask = zooms == z
         s = substeps[mask]
         ax.plot(s, route_ms[mask], '-o', markersize=3, color=colors[i],
-                label=f'route (zoom {z:.1f})')
+                label=f'route (z={z:.1f})')
         ax.plot(s, blend_ms[mask], '--s', markersize=3, color=colors[i],
-                label=f'blend (zoom {z:.1f})', alpha=0.7)
-        ax.plot(s, exchange_ms[mask], ':^', markersize=3, color=colors[i],
-                label=f'exchange (zoom {z:.1f})', alpha=0.5)
+                label=f'blend (z={z:.1f})', alpha=0.7)
     ax.set_ylabel("Time (ms)")
-    ax.set_title("Per-phase timing per substep")
+    ax.set_title("Host-measured phase timing (route = single CS, blend = single CS)")
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
 
@@ -76,8 +80,30 @@ def main():
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
 
-    # Plot 3: Convergence — total visible Gaussians
-    ax = axes[2]
+    # Plot 3: On-tile cycle breakdown (if available)
+    if has_cycles:
+        cyc_clear = np.array(cyc_clear)
+        cyc_routing = np.array(cyc_routing)
+        cyc_proj = np.array(cyc_proj)
+        cyc_sort = np.array(cyc_sort)
+
+        ax = axes[2]
+        for i, z in enumerate(unique_zooms):
+            mask = zooms == z
+            s = substeps[mask]
+            ax.plot(s, cyc_routing[mask], '-o', markersize=3, color=colors[i],
+                    label=f'routing (z={z:.1f})')
+            ax.plot(s, cyc_proj[mask], '--s', markersize=3, color=colors[i],
+                    label=f'project (z={z:.1f})', alpha=0.7)
+            ax.plot(s, cyc_sort[mask], ':^', markersize=3, color=colors[i],
+                    label=f'sort (z={z:.1f})', alpha=0.5)
+        ax.set_ylabel("Time (ms, from cycle counter)")
+        ax.set_title("On-tile cycle breakdown (mean across 1440 tiles, @1.85 GHz)")
+        ax.legend(loc="upper right", fontsize=7, ncol=2)
+        ax.grid(True, alpha=0.3)
+
+    # Plot N: Convergence
+    ax = axes[-1]
     for i, z in enumerate(unique_zooms):
         mask = zooms == z
         s = substeps[mask]
@@ -96,9 +122,13 @@ def main():
     plt.close()
 
     # Summary table
-    print(f"\n{'Zoom':<8} {'Route ms':>10} {'Blend ms':>10} {'Exch ms':>10} "
-          f"{'Total ms':>10} {'FPS':>8} {'Visible':>10} {'Settled':>8}")
-    print("-" * 80)
+    hdr = (f"{'Zoom':<8} {'Route ms':>10} {'Blend ms':>10} {'Exch ms':>10} "
+           f"{'Total ms':>10} {'FPS':>8}")
+    if has_cycles:
+        hdr += f" {'Clear':>8} {'Routing':>8} {'Project':>8} {'Sort':>8}"
+    hdr += f" {'Visible':>10} {'Settled':>8}"
+    print(f"\n{hdr}")
+    print("-" * len(hdr))
     for z in unique_zooms:
         mask = zooms == z
         r = route_ms[mask]
@@ -113,8 +143,16 @@ def main():
                 settled = j
                 break
 
-        print(f"{z:<8.2f} {r.mean():>10.3f} {b.mean():>10.3f} {e.mean():>10.3f} "
-              f"{t.mean():>10.3f} {1000/t.mean():>8.1f} {v[-1]:>10d} {settled:>8d}")
+        line = (f"{z:<8.2f} {r.mean():>10.3f} {b.mean():>10.3f} {e.mean():>10.3f} "
+                f"{t.mean():>10.3f} {1000/t.mean():>8.1f}")
+        if has_cycles:
+            cr = cyc_routing[mask]
+            cp = cyc_proj[mask]
+            cs = cyc_sort[mask]
+            cc = cyc_clear[mask]
+            line += f" {cc.mean():>8.3f} {cr.mean():>8.3f} {cp.mean():>8.3f} {cs.mean():>8.3f}"
+        line += f" {v[-1]:>10d} {settled:>8d}"
+        print(line)
 
 if __name__ == "__main__":
     main()
