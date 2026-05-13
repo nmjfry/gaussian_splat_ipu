@@ -18,6 +18,12 @@ def main():
 
     with open(path) as f:
         reader = csv.DictReader(f)
+        fields = reader.fieldnames
+        # Detect old format: frame,zoom,frame_ms
+        if "substep" not in fields and "frame" in fields:
+            print(f"Detected old CSV format ({','.join(fields)}).")
+            print("Rebuild with the new benchmark code and re-run --benchmark.")
+            sys.exit(1)
         for row in reader:
             zooms.append(float(row["zoom"]))
             substeps.append(int(row["substep"]))
