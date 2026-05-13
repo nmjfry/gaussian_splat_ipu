@@ -378,9 +378,9 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
 
   // Device-side render loop: runs on-device until host sets flag to 0.
   // Eliminates per-frame host↔device engine.run() barrier.
-  auto flagTensor = vg.addVariable(INT, {1}, "continue_flag");
+  auto flagTensor = vg.addVariable(INT, {}, "continue_flag");
   vg.setTileMapping(flagTensor, 0u);
-  continueFlag = flagTensor;
+  continueFlag = flagTensor.reshape({1});
 
   auto condProgram = continueFlag.buildWrite(vg, true);
 
