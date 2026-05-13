@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot per-frame timing from benchmark_profile.csv.
+"""Plot per-phase timing and convergence from benchmark_profile.csv.
 
 Usage:
     python3 tools/plot_profile.py benchmark_profile.csv
@@ -13,44 +13,74 @@ import numpy as np
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "benchmark_profile.csv"
 
-    frames, zooms, frame_ms = [], [], []
+    zooms, substeps = [], []
+    route_ms, blend_ms, exchange_ms, total_ms, total_visible = [], [], [], [], []
 
     with open(path) as f:
         reader = csv.DictReader(f)
         for row in reader:
-            frames.append(int(row["frame"]))
             zooms.append(float(row["zoom"]))
-            frame_ms.append(float(row["frame_ms"]))
+            substeps.append(int(row["substep"]))
+            route_ms.append(float(row["route_ms"]))
+            blend_ms.append(float(row["blend_ms"]))
+            exchange_ms.append(float(row["exchange_ms"]))
+            total_ms.append(float(row["total_ms"]))
+            total_visible.append(int(row["total_visible"]))
 
-    frames = np.array(frames)
     zooms = np.array(zooms)
-    frame_ms = np.array(frame_ms)
+    substeps = np.array(substeps)
+    route_ms = np.array(route_ms)
+    blend_ms = np.array(blend_ms)
+    exchange_ms = np.array(exchange_ms)
+    total_ms = np.array(total_ms)
+    total_visible = np.array(total_visible)
 
-    zoom_changes = np.where(np.diff(zooms) != 0)[0] + 1
+    unique_zooms = sorted(set(zooms))
+    n_zooms = len(unique_zooms)
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
 
-    # Plot 1: Per-frame time
+    colors = plt.cm.tab10(np.linspace(0, 1, max(n_zooms, 2)))
+
+    # Plot 1: Stacked phase timing per substep
     ax = axes[0]
-    ax.plot(frames, frame_ms, "o-", markersize=2, label="Frame time")
-    for zc in zoom_changes:
-        ax.axvline(x=frames[zc], color="red", linestyle="--", alpha=0.5,
-                   label="Zoom change" if zc == zoom_changes[0] else "")
-    ax.set_ylabel("Frame time (ms)")
-    ax.set_title("Per-frame time (expect spike after each zoom change, then settle)")
+    for i, z in enumerate(unique_zooms):
+        mask = zooms == z
+        s = substeps[mask]
+        ax.plot(s, route_ms[mask], '-o', markersize=3, color=colors[i],
+                label=f'route (zoom {z:.1f})')
+        ax.plot(s, blend_ms[mask], '--s', markersize=3, color=colors[i],
+                label=f'blend (zoom {z:.1f})', alpha=0.7)
+        ax.plot(s, exchange_ms[mask], ':^', markersize=3, color=colors[i],
+                label=f'exchange (zoom {z:.1f})', alpha=0.5)
+    ax.set_ylabel("Time (ms)")
+    ax.set_title("Per-phase timing per substep")
+    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    # Plot 2: Total substep time
+    ax = axes[1]
+    for i, z in enumerate(unique_zooms):
+        mask = zooms == z
+        s = substeps[mask]
+        ax.plot(s, total_ms[mask], '-o', markersize=3, color=colors[i],
+                label=f'zoom {z:.1f}')
+    ax.set_ylabel("Total substep time (ms)")
+    ax.set_title("Total substep time (route + blend + exchange)")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
 
-    # Plot 2: FPS
-    ax = axes[1]
-    fps = 1000.0 / frame_ms
-    ax.plot(frames, fps, "o-", markersize=2, color="tab:green", label="FPS")
-    for zc in zoom_changes:
-        ax.axvline(x=frames[zc], color="red", linestyle="--", alpha=0.5)
-    ax.set_ylabel("FPS")
-    ax.set_xlabel("Frame")
-    ax.set_title("Frames per second")
-    ax.legend(loc="upper right")
+    # Plot 3: Convergence — total visible Gaussians
+    ax = axes[2]
+    for i, z in enumerate(unique_zooms):
+        mask = zooms == z
+        s = substeps[mask]
+        ax.plot(s, total_visible[mask], '-o', markersize=3, color=colors[i],
+                label=f'zoom {z:.1f}')
+    ax.set_ylabel("Total visible Gaussians")
+    ax.set_xlabel("Substep")
+    ax.set_title("Convergence: visible Gaussians vs routing substeps")
+    ax.legend(loc="lower right")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -59,16 +89,26 @@ def main():
     print(f"Saved plot to {out}")
     plt.close()
 
-    # Print summary table
-    unique_zooms = sorted(set(zooms))
-    print(f"\n{'Zoom':<8} {'Mean ms':>10} {'Std ms':>10} {'FPS':>8} {'Frame 0 ms':>12} {'Settled ms':>12}")
-    print("-" * 65)
+    # Summary table
+    print(f"\n{'Zoom':<8} {'Route ms':>10} {'Blend ms':>10} {'Exch ms':>10} "
+          f"{'Total ms':>10} {'FPS':>8} {'Visible':>10} {'Settled':>8}")
+    print("-" * 80)
     for z in unique_zooms:
         mask = zooms == z
-        ms = frame_ms[mask]
-        settled = ms[min(20, len(ms)):]  # skip first 20 frames
-        print(f"{z:<8.2f} {ms.mean():>10.3f} {ms.std():>10.3f} {1000/ms.mean():>8.1f} "
-              f"{ms[0]:>12.3f} {settled.mean():>12.3f}" if len(settled) > 0 else "")
+        r = route_ms[mask]
+        b = blend_ms[mask]
+        e = exchange_ms[mask]
+        t = total_ms[mask]
+        v = total_visible[mask]
+
+        settled = -1
+        for j in range(1, len(v)):
+            if v[j] == v[j-1]:
+                settled = j
+                break
+
+        print(f"{z:<8.2f} {r.mean():>10.3f} {b.mean():>10.3f} {e.mean():>10.3f} "
+              f"{t.mean():>10.3f} {1000/t.mean():>8.1f} {v[-1]:>10d} {settled:>8d}")
 
 if __name__ == "__main__":
     main()

@@ -305,33 +305,32 @@ int main(int argc, char** argv) {
   ipuSplatter->updateProjection(projection);
   gm.prepareEngine();
 
-  // --benchmark N: render N frames headlessly at 7 zoom levels and exit.
-  // Outputs per-frame CSV to benchmark_profile.csv.
-  // Uses --from-pose if provided, otherwise the default lookAt view.
-  const int benchmarkFrames = args["benchmark"].as<int>();
-  if (benchmarkFrames > 0) {
+  // --benchmark N: run N substeps per zoom level with per-phase timing and
+  // convergence tracking. Outputs CSV with route/blend/exchange breakdown
+  // and total visible Gaussian count per substep.
+  const int benchmarkSubsteps = args["benchmark"].as<int>();
+  if (benchmarkSubsteps > 0) {
     static const glm::mat4 kFlip = glm::mat4(
         glm::vec4( 1.f,  0.f,  0.f, 0.f),
         glm::vec4( 0.f, -1.f,  0.f, 0.f),
         glm::vec4( 0.f,  0.f, -1.f, 0.f),
         glm::vec4( 0.f,  0.f,  0.f, 1.f));
 
-    // Zoom OUT from the starting pose in small steps.
-    // Factor >1 = pull camera backward along view direction.
-    const float zoomLevels[] = {1.0f, 1.1f, 1.2f, 1.35f, 1.5f, 1.7f, 2.0f};
+    // Initialize: first execute connects streams and writes vertices
+    gm.execute(*ipuSplatter);
+
+    const float zoomLevels[] = {1.0f, 1.2f, 1.5f, 2.0f};
     const int nZooms = sizeof(zoomLevels) / sizeof(zoomLevels[0]);
     const float sceneRadius = glm::length(bb.diagonal()) * 0.5f;
 
     FILE* csv = fopen("benchmark_profile.csv", "w");
-    fprintf(csv, "frame,zoom,frame_ms\n");
+    fprintf(csv, "zoom,substep,route_ms,blend_ms,exchange_ms,total_ms,mvp_ms,total_visible\n");
 
-    printf("\n%-6s %8s %8s %10s\n", "Zoom", "FPS", "ms/f", "Distance");
-    printf("%-6s %8s %8s %10s\n", "------", "--------", "--------", "----------");
+    printf("\n%-6s %6s %10s %10s %10s %10s %10s %12s\n",
+           "Zoom", "Step", "Route ms", "Blend ms", "Exch ms", "Total ms", "MVP ms", "Visible");
+    printf("%s\n", std::string(80, '-').c_str());
 
-    int globalFrame = 0;
     for (int z = 0; z < nZooms; ++z) {
-      // Move camera backward along view direction (negative Z in OpenGL).
-      // zoomLevel=1.0 stays at starting pose, >1.0 pulls back.
       float moveBack = sceneRadius * 0.5f * (zoomLevels[z] - 1.0f);
       glm::mat4 zoomTranslate = glm::translate(glm::mat4(1.0f),
                                                 glm::vec3(0.f, 0.f, -moveBack));
@@ -341,32 +340,50 @@ int main(int argc, char** argv) {
       ipuSplatter->updateProjection(projection);
       ipuSplatter->updateFocalLengths(state.fov, 0.f);
 
-      double sum_ms = 0;
+      using clk = std::chrono::steady_clock;
+      auto t0 = clk::now();
+      ipuSplatter->broadcastMVP();
+      auto t1 = clk::now();
+      double mvp_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-      for (int i = 0; i < benchmarkFrames; ++i) {
-        gm.execute(*ipuSplatter);
-        double frame_ms = ipuSplatter->getLastPhaseTiming().compute_ms;
+      unsigned prevCount = 0;
+      int settledAt = -1;
 
-        fprintf(csv, "%d,%.2f,%.4f\n", globalFrame, zoomLevels[z], frame_ms);
+      for (int s = 0; s < benchmarkSubsteps; ++s) {
+        auto timing = ipuSplatter->runSingleSubstep();
+        ipuSplatter->readbackCounts();
+        unsigned totalVisible = ipuSplatter->getTotalSplatCount();
 
-        sum_ms += frame_ms;
-        globalFrame++;
+        fprintf(csv, "%.2f,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%u\n",
+                zoomLevels[z], s,
+                timing.route_ms, timing.blend_ms, timing.exchange_ms,
+                timing.compute_ms, (s == 0 ? mvp_ms : 0.0), totalVisible);
+
+        if (s % 5 == 0 || s < 5) {
+          printf("%-6.2f %6d %10.3f %10.3f %10.3f %10.3f %10.3f %12u\n",
+                 zoomLevels[z], s,
+                 timing.route_ms, timing.blend_ms, timing.exchange_ms,
+                 timing.compute_ms, (s == 0 ? mvp_ms : 0.0), totalVisible);
+        }
+
+        if (settledAt < 0 && s > 0 && totalVisible == prevCount) {
+          settledAt = s;
+        }
+        prevCount = totalVisible;
       }
 
-      double avg_ms = sum_ms / benchmarkFrames;
-      double fps = 1000.0 / avg_ms;
-      float camDist = sceneRadius * 2.0f * zoomLevels[z];
-
-      printf("%-6.2f %8.2f %8.3f %10.3f\n", zoomLevels[z], fps, avg_ms, camDist);
-
+      ipuSplatter->readbackFramebuffer();
       ipuSplatter->getFrameBuffer(*imagePtr);
       char fname[64];
       snprintf(fname, sizeof(fname), "benchmark_zoom_%.2f.png", zoomLevels[z]);
       cv::imwrite(fname, *imagePtr);
+
+      printf("  -> zoom %.2f settled at substep %d, %u visible Gaussians\n\n",
+             zoomLevels[z], settledAt, prevCount);
     }
 
     fclose(csv);
-    printf("\nPer-frame timing saved to benchmark_profile.csv\n");
+    printf("Per-phase timing saved to benchmark_profile.csv\n");
     printf("Saved %d frames as benchmark_zoom_*.png\n", nZooms);
     return EXIT_SUCCESS;
   }

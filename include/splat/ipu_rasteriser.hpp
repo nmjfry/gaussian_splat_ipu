@@ -16,10 +16,12 @@ namespace splat {
 
 struct PhaseTiming {
   double mvp_ms = 0;
-  double compute_ms = 0;
+  double route_ms = 0;
+  double blend_ms = 0;
   double exchange_ms = 0;
   double readback_ms = 0;
-  double total_ms() const { return mvp_ms + compute_ms + exchange_ms + readback_ms; }
+  double compute_ms = 0;
+  double total_ms() const { return mvp_ms + route_ms + blend_ms + exchange_ms + readback_ms; }
 };
 
 // Fwd decls:
@@ -43,6 +45,12 @@ public:
 
   void setProfilingMode(bool enabled) { profilingMode = enabled; }
   PhaseTiming getLastPhaseTiming() const { return lastTiming; }
+
+  void broadcastMVP();
+  PhaseTiming runSingleSubstep();
+  void readbackCounts();
+  void readbackFramebuffer();
+  unsigned getTotalSplatCount() const;
 
   void setDeviceLoopMode(bool enabled) { deviceLoopMode = enabled; }
   void stopDeviceLoop();
@@ -72,6 +80,7 @@ private:
   std::atomic<bool> initialised;
   const bool disableAMPVertices;
   bool profilingMode = false;
+  poplar::Engine* enginePtr = nullptr;
   bool deviceLoopMode = false;
   std::atomic<bool> deviceLoopRunning{false};
   std::thread deviceThread;

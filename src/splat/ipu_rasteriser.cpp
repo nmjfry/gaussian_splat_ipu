@@ -405,11 +405,19 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   getPrograms().add("project", main);
   getPrograms().add("render_loop",
       program::RepeatWhileTrue(condProgram, flagTensor, frameBody));
+
+  getPrograms().add("broadcast_mvp", broadcastMvp);
+  getPrograms().add("single_route", program::Execute(routeCs));
+  getPrograms().add("single_blend", program::Execute(blendCs));
+  getPrograms().add("single_exchange", broadcastPoints);
+  getPrograms().add("read_fb", readFb);
+  getPrograms().add("read_counts", readCounts);
 }
 
 void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) {
   if (!initialised) {
     initialised = true;
+    enginePtr = &engine;
     modelView.connectWriteStream(engine, hostModelView);
     projection.connectWriteStream(engine, hostProjection);
     fxy.connectWriteStream(engine, fxyHost);
@@ -439,6 +447,43 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
   getPrograms().run(engine, "project");
   auto t1 = clk::now();
   lastTiming.compute_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+}
+
+void IpuSplatter::broadcastMVP() {
+  getPrograms().run(*enginePtr, "broadcast_mvp");
+}
+
+PhaseTiming IpuSplatter::runSingleSubstep() {
+  using clk = std::chrono::steady_clock;
+  PhaseTiming t;
+
+  auto t0 = clk::now();
+  getPrograms().run(*enginePtr, "single_route");
+  auto t1 = clk::now();
+  getPrograms().run(*enginePtr, "single_blend");
+  auto t2 = clk::now();
+  getPrograms().run(*enginePtr, "single_exchange");
+  auto t3 = clk::now();
+
+  t.route_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  t.blend_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+  t.exchange_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+  t.compute_ms = t.route_ms + t.blend_ms + t.exchange_ms;
+  return t;
+}
+
+void IpuSplatter::readbackCounts() {
+  getPrograms().run(*enginePtr, "read_counts");
+}
+
+void IpuSplatter::readbackFramebuffer() {
+  getPrograms().run(*enginePtr, "read_fb");
+}
+
+unsigned IpuSplatter::getTotalSplatCount() const {
+  unsigned total = 0;
+  for (auto c : splatCounts) total += c;
+  return total;
 }
 
 void IpuSplatter::stopDeviceLoop() {
