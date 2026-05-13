@@ -8,6 +8,36 @@ Usage:
 import sys
 import pva
 
+def classify_step(step):
+    """Classify an execution step into a human-readable phase."""
+    prog_type = type(step.program).__name__
+    prog_name = ""
+    try:
+        prog_name = step.program.name
+    except:
+        pass
+
+    if "OnTileExecute" in prog_type:
+        if "project" in prog_name or "project" in str(prog_name):
+            return "GSplat Compute"
+        elif "Copy" in prog_name or "copy" in prog_name:
+            return "On-tile Copy"
+        else:
+            return f"Compute({prog_name})"
+    elif "DoExchange" in prog_type:
+        return "NEWS Exchange"
+    elif "StreamCopy" in prog_type:
+        return "Stream I/O"
+    elif prog_type == "Program":
+        if "Sync" in prog_name:
+            return "Sync"
+        elif "Internal" in prog_name:
+            return "Internal Sync"
+        else:
+            return f"Program({prog_name})"
+    else:
+        return prog_type
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "profile/ipu_utils_engine/profile.pop"
     print(f"Loading {path}...")
@@ -17,78 +47,91 @@ def main():
     clock_hz = target.clockFrequency
     print(f"Target: {target.numTiles} tiles, {clock_hz/1e6:.0f} MHz tile clock")
 
-    # Per-step cycle breakdown
+    steps = list(report.execution.steps)
+
+    # Raw step table
     print(f"\n{'Step':>4} {'Type':<25} {'Max Cycles':>12} {'ms':>10} {'Mean Cycles':>12} {'ms':>10}")
     print("-" * 80)
 
-    total_max = 0
-    for i, step in enumerate(report.execution.steps):
+    for i, step in enumerate(steps):
         prog_type = type(step.program).__name__
         cycles = list(step.cyclesByTile)
         if not cycles:
             continue
         max_c = max(cycles)
-        mean_c = sum(cycles) / len(cycles) if cycles else 0
-        total_max += max_c
+        mean_c = sum(cycles) / len(cycles)
         max_ms = max_c / clock_hz * 1000
         mean_ms = mean_c / clock_hz * 1000
 
-        # Try to get program name
-        prog_name = ""
-        try:
-            prog_name = step.program.name
-        except:
-            pass
-        label = f"{prog_type}"
-        if prog_name:
-            label = f"{prog_type}({prog_name})"
+        label = classify_step(step)
         if len(label) > 25:
             label = label[:22] + "..."
 
         print(f"{i:>4} {label:<25} {max_c:>12,} {max_ms:>10.4f} {mean_c:>12,.0f} {mean_ms:>10.4f}")
 
-    print(f"\n{'Total (sum of max)':>30}: {total_max:>12,} {total_max/clock_hz*1000:>10.4f} ms")
+    # Identify frame boundaries: each frame starts with Stream I/O for mv/write
+    # Group runs by looking at execution.runs
+    runs = list(report.execution.runs)
+    print(f"\n=== {len(runs)} Execution Runs ===")
 
-    # Per-run breakdown (each run = one frame in benchmark)
-    print(f"\n=== Runs (frames) ===")
-    for i, run in enumerate(report.execution.runs):
+    for ri, run in enumerate(runs):
         try:
             ipu_cycles = list(run.cyclesByIpu)
             if ipu_cycles:
                 max_c = max(ipu_cycles)
-                print(f"  Run {i}: {max_c:,} cycles ({max_c/clock_hz*1000:.4f} ms)")
-        except Exception as e:
-            print(f"  Run {i}: {e}")
-        if i > 10:
-            remaining = len(list(report.execution.runs)) - i - 1
-            if remaining > 0:
-                print(f"  ... ({remaining} more runs)")
-            break
+                print(f"  Run {ri}: {max_c:,} cycles ({max_c/clock_hz*1000:.4f} ms)")
+        except:
+            pass
 
-    # Compute set estimated cycles
-    print(f"\n=== Compute Sets (estimated cycles) ===")
-    for cs in report.compilation.computeSets:
-        name = cs.name
-        est = list(cs.estimatedCyclesByTile)
-        if est:
-            max_c = max(est)
-            mean_c = sum(est) / len(est)
-            print(f"  {name:<60} max={max_c:>10,} ({max_c/clock_hz*1000:.4f} ms)  mean={mean_c:>10,.0f}")
-        else:
-            print(f"  {name}: no estimated cycles")
+        run_steps = list(run.steps)
+        # Aggregate by phase within this run
+        phase_cycles = {}
+        for step in run_steps:
+            phase = classify_step(step)
+            cycles = list(step.cyclesByTile)
+            if not cycles:
+                continue
+            max_c = max(cycles)
+            if phase not in phase_cycles:
+                phase_cycles[phase] = 0
+            phase_cycles[phase] += max_c
 
-    # Programs with estimated cycles
-    print(f"\n=== Programs with estimated cycles ===")
-    for prog in report.compilation.programs:
-        name = prog.name
-        if not name.strip():
+        if phase_cycles:
+            total = sum(phase_cycles.values())
+            print(f"  Phase breakdown (max tile cycles):")
+            for phase, cyc in sorted(phase_cycles.items(), key=lambda x: -x[1]):
+                ms = cyc / clock_hz * 1000
+                pct = cyc / total * 100 if total > 0 else 0
+                print(f"    {phase:<25} {cyc:>12,} ({ms:>8.4f} ms, {pct:>5.1f}%)")
+            print(f"    {'TOTAL':<25} {total:>12,} ({total/clock_hz*1000:>8.4f} ms)")
+        print()
+
+    # Summary: compute-only breakdown across all runs
+    print("=== On-Device Compute Summary (excluding stream I/O and sync) ===")
+    compute_phases = {}
+    for step in steps:
+        phase = classify_step(step)
+        if phase in ("Stream I/O", "Sync", "Internal Sync"):
             continue
-        est = getattr(prog, 'estimatedCyclesByTile', None)
-        if est is not None:
-            est = list(est)
-            if est and max(est) > 0:
-                max_c = max(est)
-                print(f"  {name:<60} max={max_c:>10,} ({max_c/clock_hz*1000:.4f} ms)")
+        cycles = list(step.cyclesByTile)
+        if not cycles:
+            continue
+        max_c = max(cycles)
+        mean_c = sum(cycles) / len(cycles)
+        if phase not in compute_phases:
+            compute_phases[phase] = {"max_total": 0, "mean_total": 0, "count": 0}
+        compute_phases[phase]["max_total"] += max_c
+        compute_phases[phase]["mean_total"] += mean_c
+        compute_phases[phase]["count"] += 1
+
+    n_frames = max(1, compute_phases.get("GSplat Compute", {}).get("count", 1))
+    print(f"  Frames profiled: {n_frames}")
+    print(f"\n  {'Phase':<25} {'Total Max':>12} {'Per-frame Max':>14} {'Per-frame ms':>12}")
+    print(f"  {'-'*65}")
+    for phase, data in sorted(compute_phases.items(), key=lambda x: -x[1]["max_total"]):
+        per_frame = data["max_total"] / n_frames
+        per_frame_ms = per_frame / clock_hz * 1000
+        print(f"  {phase:<25} {data['max_total']:>12,} {per_frame:>14,.0f} {per_frame_ms:>12.4f}")
 
 if __name__ == "__main__":
     main()
