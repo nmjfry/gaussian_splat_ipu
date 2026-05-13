@@ -53,7 +53,10 @@ void addOptions(boost::program_options::options_description& desc) {
    "matrix and FOV from it so the server starts with that exact pose.")
   ("benchmark", po::value<int>()->default_value(0),
    "Run N frames headlessly with a fixed pose and report mean FPS, then exit. "
-   "No --ui-port needed. Uses initial view or --from-pose if provided.");
+   "No --ui-port needed. Uses initial view or --from-pose if provided.")
+  ("device-loop", po::bool_switch()->default_value(false),
+   "Use RepeatWhileTrue device-side loop for IPU rendering. Eliminates "
+   "per-frame host-device barrier for higher throughput.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -396,7 +399,13 @@ int main(int argc, char** argv) {
 
   auto secondsElapsed = 0.0;
 
-  auto  dynamicView = viewMatrix;  
+  const bool useDeviceLoop = args["device-loop"].as<bool>() && state.device == "ipu";
+  if (useDeviceLoop) {
+    ipuSplatter->setDeviceLoopMode(true);
+    ipu_utils::logger()->info("Device loop mode enabled (RepeatWhileTrue)");
+  }
+
+  auto  dynamicView = viewMatrix;
   do {
     auto startTime = std::chrono::steady_clock::now();
     *imagePtr = 0;
@@ -552,6 +561,10 @@ int main(int argc, char** argv) {
     }
 
   } while (uiServer && state.stop == false);
+
+  if (useDeviceLoop) {
+    ipuSplatter->stopDeviceLoop();
+  }
 
   hostProcessing.waitForCompletion();
 

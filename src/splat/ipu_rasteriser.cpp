@@ -20,10 +20,11 @@ namespace splat {
 
 IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
   : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"),
-    counts("splat_counts"),
+    counts("splat_counts"), continueFlag("continue_flag"),
     hostModelView(16),
     hostProjection(16),
     fxyHost(2),
+    hostContinueFlag(1, 1),
     initialised(false),
     disableAMPVertices(noAMP),
     fbMapping(fb)
@@ -44,10 +45,11 @@ IpuSplatter::IpuSplatter(const Points& verts, TiledFramebuffer& fb, bool noAMP)
 
 IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAMP)
   : modelView("mv"), projection("mp"), fxy("fxy"), inputVertices("verts_in"), outputFramebuffer("frame_buffer"),
-    counts("splat_counts"),
+    counts("splat_counts"), continueFlag("continue_flag"),
     hostModelView(16),
     hostProjection(16),
     fxyHost(2),
+    hostContinueFlag(1, 1),
     initialised(false),
     disableAMPVertices(noAMP),
     fbMapping(fb)
@@ -365,17 +367,36 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   substep.add(program::Execute(splatCs));
   substep.add(broadcastPoints);
 
+  auto readFb = outputFramebuffer.buildRead(vg, true);
+  auto readCounts = counts.buildRead(vg, true);
+
   program::Sequence main;
   main.add(broadcastMvp);
   main.add(program::Repeat(routingRepeats, substep));
-  main.add(outputFramebuffer.buildRead(vg, true));
-  main.add(counts.buildRead(vg, true));
+  main.add(readFb);
+  main.add(readCounts);
+
+  // Device-side render loop: runs on-device until host sets flag to 0.
+  // Eliminates per-frame host↔device engine.run() barrier.
+  auto flagTensor = vg.addVariable(INT, {1}, "continue_flag");
+  vg.setTileMapping(flagTensor, 0u);
+  continueFlag = flagTensor;
+
+  auto condProgram = continueFlag.buildWrite(vg, true);
+
+  program::Sequence frameBody;
+  frameBody.add(broadcastMvp);
+  frameBody.add(program::Repeat(routingRepeats, substep));
+  frameBody.add(readFb);
+  frameBody.add(readCounts);
 
   program::Sequence setup;
   setup.add(inputVertices.buildWrite(vg, true));
 
   getPrograms().add("write_verts", setup);
   getPrograms().add("project", main);
+  getPrograms().add("render_loop",
+      program::RepeatWhileTrue(condProgram, flagTensor, frameBody));
 }
 
 void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) {
@@ -387,7 +408,22 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
     inputVertices.connectWriteStream(engine, hostVertices);
     outputFramebuffer.connectReadStream(engine, frameBuffer);
     counts.connectReadStream(engine, splatCounts);
+    continueFlag.connectWriteStream(engine, hostContinueFlag);
     getPrograms().run(engine, "write_verts");
+  }
+
+  if (deviceLoopMode && !deviceLoopRunning.load()) {
+    hostContinueFlag[0] = 1;
+    deviceLoopRunning = true;
+    deviceThread = std::thread([this, &engine]() {
+      getPrograms().run(engine, "render_loop");
+      deviceLoopRunning = false;
+    });
+    return;
+  }
+
+  if (deviceLoopMode) {
+    return;
   }
 
   using clk = std::chrono::steady_clock;
@@ -395,6 +431,16 @@ void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) 
   getPrograms().run(engine, "project");
   auto t1 = clk::now();
   lastTiming.compute_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+}
+
+void IpuSplatter::stopDeviceLoop() {
+  if (deviceLoopRunning.load()) {
+    hostContinueFlag[0] = 0;
+    if (deviceThread.joinable()) {
+      deviceThread.join();
+    }
+    deviceLoopRunning = false;
+  }
 }
 
 } // end of namespace splat

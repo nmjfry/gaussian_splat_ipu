@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <chrono>
+#include <thread>
 
 #include <ipu/ipu_utils.hpp>
 #include <glm/mat4x4.hpp>
@@ -43,6 +44,10 @@ public:
   void setProfilingMode(bool enabled) { profilingMode = enabled; }
   PhaseTiming getLastPhaseTiming() const { return lastTiming; }
 
+  void setDeviceLoopMode(bool enabled) { deviceLoopMode = enabled; }
+  void stopDeviceLoop();
+  bool isDeviceLoopRunning() const { return deviceLoopRunning.load(); }
+
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
   void execute(poplar::Engine& engine, const poplar::Device& device) override;
@@ -54,17 +59,22 @@ private:
   ipu_utils::StreamableTensor outputFramebuffer;
   ipu_utils::StreamableTensor counts;
   ipu_utils::StreamableTensor fxy;
+  ipu_utils::StreamableTensor continueFlag;
 
   std::vector<float> hostModelView;
   std::vector<float> hostProjection;
   std::vector<float> hostVertices;
   std::vector<unsigned> splatCounts;
   std::vector<float> fxyHost;
+  std::vector<int32_t> hostContinueFlag;
   TiledFramebuffer fbMapping;
   std::vector<unsigned char> frameBuffer;
   std::atomic<bool> initialised;
   const bool disableAMPVertices;
   bool profilingMode = false;
+  bool deviceLoopMode = false;
+  std::atomic<bool> deviceLoopRunning{false};
+  std::thread deviceThread;
   PhaseTiming lastTiming;
 };
 
