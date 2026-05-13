@@ -313,7 +313,9 @@ int main(int argc, char** argv) {
         glm::vec4( 0.f,  0.f, -1.f, 0.f),
         glm::vec4( 0.f,  0.f,  0.f, 1.f));
 
-    const float zoomLevels[] = {1.0f, 0.7f, 0.5f, 0.35f, 0.25f, 0.15f, 0.1f};
+    // Zoom OUT from the starting pose in small steps.
+    // Factor >1 = pull camera backward along view direction.
+    const float zoomLevels[] = {1.0f, 1.1f, 1.2f, 1.35f, 1.5f, 1.7f, 2.0f};
     const int nZooms = sizeof(zoomLevels) / sizeof(zoomLevels[0]);
     const float sceneRadius = glm::length(bb.diagonal()) * 0.5f;
 
@@ -325,9 +327,11 @@ int main(int argc, char** argv) {
 
     int globalFrame = 0;
     for (int z = 0; z < nZooms; ++z) {
-      float moveForward = sceneRadius * 2.0f * (1.0f - zoomLevels[z]);
+      // Move camera backward along view direction (negative Z in OpenGL).
+      // zoomLevel=1.0 stays at starting pose, >1.0 pulls back.
+      float moveBack = sceneRadius * 0.5f * (zoomLevels[z] - 1.0f);
       glm::mat4 zoomTranslate = glm::translate(glm::mat4(1.0f),
-                                                glm::vec3(0.f, 0.f, moveForward));
+                                                glm::vec3(0.f, 0.f, -moveBack));
       auto benchView = kFlip * zoomTranslate * viewMatrix;
 
       ipuSplatter->updateModelView(benchView);
