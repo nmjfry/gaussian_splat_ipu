@@ -150,6 +150,8 @@ def main():
                           "(GLM column-major: 4 numbers per column, 4 columns).")
     p.add_argument("--target", nargs=3, type=float, default=[0, 0, 0])
     p.add_argument("--up",     nargs=3, type=float, default=[0, 1, 0])
+    p.add_argument("--benchmark", type=int, default=0,
+                   help="Render N frames and report mean FPS (0 = single render)")
     args = p.parse_args()
 
     print(f"Loading {args.ply} ...")
@@ -174,7 +176,23 @@ def main():
         V, _ = look_at(eye, centroid, [0, 1, 0])
         print(f"  auto camera: eye={eye.tolist()}")
 
-    render(g, V, args.width, args.height, args.fov_deg, args.out)
+    if args.benchmark > 0:
+        import time
+        # Warm-up
+        for _ in range(5):
+            render(g, V, args.width, args.height, args.fov_deg, args.out)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(args.benchmark):
+            render(g, V, args.width, args.height, args.fov_deg, args.out)
+            torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        secs = t1 - t0
+        fps = args.benchmark / secs
+        print(f"BENCHMARK: frames={args.benchmark} total_sec={secs:.4f} "
+              f"fps={fps:.2f} ms_per_frame={1000*secs/args.benchmark:.3f}")
+    else:
+        render(g, V, args.width, args.height, args.fov_deg, args.out)
 
 
 if __name__ == "__main__":

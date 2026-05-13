@@ -50,7 +50,10 @@ void addOptions(boost::program_options::options_description& desc) {
    "A sibling watcher (tools/gpu_watch.py) turns each JSON into a GPU reference render.")
   ("from-pose", po::value<std::string>()->default_value(""),
    "Path to a sidecar .json saved by the Screenshot button. Loads the view "
-   "matrix and FOV from it so the server starts with that exact pose.");
+   "matrix and FOV from it so the server starts with that exact pose.")
+  ("benchmark", po::value<int>()->default_value(0),
+   "Run N frames headlessly with a fixed pose and report mean FPS, then exit. "
+   "No --ui-port needed. Uses initial view or --from-pose if provided.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -298,6 +301,71 @@ int main(int argc, char** argv) {
   ipuSplatter->updateModelView(viewMatrix);
   ipuSplatter->updateProjection(projection);
   gm.prepareEngine();
+
+  // --benchmark N: render N frames headlessly with a fixed pose and exit.
+  const int benchmarkFrames = args["benchmark"].as<int>();
+  if (benchmarkFrames > 0) {
+    // Apply the same OpenGL→COLMAP flip used in the interactive loop:
+    static const glm::mat4 kFlip = glm::mat4(
+        glm::vec4( 1.f,  0.f,  0.f, 0.f),
+        glm::vec4( 0.f, -1.f,  0.f, 0.f),
+        glm::vec4( 0.f,  0.f, -1.f, 0.f),
+        glm::vec4( 0.f,  0.f,  0.f, 1.f));
+    auto benchView = kFlip * viewMatrix;
+
+    ipuSplatter->updateModelView(benchView);
+    ipuSplatter->updateProjection(projection);
+    ipuSplatter->updateFocalLengths(state.fov, 0.f);
+
+    // Warm-up
+    for (int i = 0; i < 5; ++i) {
+      gm.execute(*ipuSplatter);
+    }
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < benchmarkFrames; ++i) {
+      gm.execute(*ipuSplatter);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    double secs = std::chrono::duration<double>(t1 - t0).count();
+    double fps = benchmarkFrames / secs;
+
+    printf("BENCHMARK: frames=%d total_sec=%.4f fps=%.2f ms_per_frame=%.3f\n",
+           benchmarkFrames, secs, fps, 1000.0 * secs / benchmarkFrames);
+
+    // Report per-phase cycle counts from the last frame
+    {
+      static constexpr int NP = 5;
+      static const char* phaseNames[] = {
+        "colourFb", "clearOutBuffers", "readInput_x4",
+        "renderInternal", "total"
+      };
+      std::vector<unsigned> phTimes;
+      ipuSplatter->getPhaseTimes(phTimes);
+      // IPU Mk2 tile clock ~1.85 GHz (adjust if needed)
+      double clockGHz = 1.85;
+      printf("\nPHASE_TIMES (mean across %d tiles, from last frame):\n", fb.numTiles);
+      for (int p = 0; p < NP; ++p) {
+        double sum = 0;
+        unsigned maxCycles = 0;
+        for (int t = 0; t < fb.numTiles; ++t) {
+          unsigned c = phTimes[t * NP + p];
+          sum += c;
+          if (c > maxCycles) maxCycles = c;
+        }
+        double meanCycles = sum / fb.numTiles;
+        double meanMs = meanCycles / (clockGHz * 1e6);
+        double maxMs  = maxCycles / (clockGHz * 1e6);
+        printf("  %-20s mean_cycles=%10.0f  mean_ms=%7.4f  max_ms=%7.4f\n",
+               phaseNames[p], meanCycles, meanMs, maxMs);
+      }
+    }
+
+    ipuSplatter->getFrameBuffer(*imagePtr);
+    cv::imwrite("benchmark_frame.png", *imagePtr);
+    ipu_utils::logger()->info("Benchmark complete. Saved last frame to benchmark_frame.png");
+    return EXIT_SUCCESS;
+  }
 
   std::vector<glm::vec4> clipSpace;
   clipSpace.reserve(pts.size());

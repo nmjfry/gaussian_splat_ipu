@@ -68,7 +68,8 @@ public:
   poplar::Input<poplar::Vector<int>> tile_id;
   poplar::Input<poplar::Vector<float>> fxy;
   poplar::Output<poplar::Vector<unsigned>> splatted;
-  
+  poplar::Output<poplar::Vector<unsigned>> phaseTimes; // 5 uints: per-phase cycle counts
+
   poplar::InOut<poplar::Vector<float>> vertsIn;
   poplar::Output<poplar::Vector<int>> indices;
   poplar::Output<poplar::Vector<float>> gaus2D;
@@ -523,12 +524,18 @@ public:
 
   bool compute(unsigned workerId) {
 
+    unsigned t0 = __builtin_ipu_get_scount_l();
+
     // zero the framebuffer
     auto black = ivec4{0.0f, 0.0f, 0.0f, 0.0f};
     colourFb(black, workerId);
 
+    unsigned t1 = __builtin_ipu_get_scount_l();
+
      //clear all of the out buffers:
     clearOutBuffers(workerId);
+
+    unsigned t2 = __builtin_ipu_get_scount_l();
 
     // construct mapping from tile to framebuffer
     const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
@@ -544,8 +551,19 @@ public:
     readInput(upIn, direction::up, projmatrix, viewmatrix, tfb, vp);
     readInput(downIn, direction::down, projmatrix, viewmatrix, tfb, vp);
 
+    unsigned t3 = __builtin_ipu_get_scount_l();
+
     renderInternal(vertsIn, projmatrix, viewmatrix, tfb, vp, workerId);
-    
+
+    unsigned t4 = __builtin_ipu_get_scount_l();
+
+    if (workerId == 0) {
+      phaseTimes[0] = t1 - t0; // colourFb
+      phaseTimes[1] = t2 - t1; // clearOutBuffers
+      phaseTimes[2] = t3 - t2; // readInput x4
+      phaseTimes[3] = t4 - t3; // renderInternal (project+bloom+sort+blend)
+      phaseTimes[4] = t4 - t0; // total
+    }
 
     return true;
   }
