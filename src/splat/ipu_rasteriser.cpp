@@ -249,9 +249,10 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   // We only want to stream to a slice of the padded tensor:
   inputVertices = paddedInput.slice(0, hostVertices.size());
 
-  // Build a compute set to transform the points:
-  const auto csName = disableAMPVertices ? "project" : "project_amp";
-  auto splatCs = vg.addComputeSet(csName);
+  // Two compute sets: route (single-worker projection/routing) then blend (6-worker pixel blending).
+  // Poplar's BSP barrier between compute sets replaces the software barrier.
+  auto routeCs = vg.addComputeSet("route");
+  auto blendCs = vg.addComputeSet("blend");
 
   // Per-tile capacity tuning. NOTE: the storage tensors are declared as
   //   addVariable(poplar::FLOAT, {extraStorageSize})  // length in FLOATS
@@ -335,18 +336,24 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
       vg.setTileMapping(tid, t);
 
 
-      auto v = vg.addVertex(splatCs, "GSplat");
-      vg.setTileMapping(v, t);
-      vg.connect(v["modelView"], localMv.flatten());
-      vg.connect(v["projection"], localProj.flatten());
-      vg.connect(v["vertsIn"], gaussians);
-      vg.connect(v["indices"], sliceIdxs);
-      vg.connect(v["gaus2D"], gaus2D);
-      vg.connect(v["localFb"], sliceFb);
-      vg.connect(v["fxy"], localFxy);
-      vg.connect(v["tile_id"], tid);
-      vg.connect(v["splatted"], counter);
-      vertices.push_back(v);
+      auto rv = vg.addVertex(routeCs, "RouteVertex");
+      vg.setTileMapping(rv, t);
+      vg.connect(rv["modelView"], localMv.flatten());
+      vg.connect(rv["projection"], localProj.flatten());
+      vg.connect(rv["vertsIn"], gaussians);
+      vg.connect(rv["indices"], sliceIdxs);
+      vg.connect(rv["gaus2D"], gaus2D);
+      vg.connect(rv["fxy"], localFxy);
+      vg.connect(rv["tile_id"], tid);
+      vg.connect(rv["splatted"], counter);
+      vertices.push_back(rv);
+
+      auto bv = vg.addVertex(blendCs, "BlendVertex");
+      vg.setTileMapping(bv, t);
+      vg.connect(bv["gaus2D"], gaus2D);
+      vg.connect(bv["splatted"], counter);
+      vg.connect(bv["tile_id"], tid);
+      vg.connect(bv["localFb"], sliceFb);
     }
   }
 
@@ -364,7 +371,8 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   constexpr unsigned routingRepeats = 2;
 
   program::Sequence substep;
-  substep.add(program::Execute(splatCs));
+  substep.add(program::Execute(routeCs));
+  substep.add(program::Execute(blendCs));
   substep.add(broadcastPoints);
 
   auto readFb = outputFramebuffer.buildRead(vg, true);

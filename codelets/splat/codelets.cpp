@@ -48,7 +48,7 @@ template <typename G, typename Vec> bool insert(Vec &buffer, const G& g) {
     float gid;
     // assumes gid is float and last element in the struct
     size_t gidIdx = (sizeof(g) - sizeof(gid)) / sizeof(float);
-    memcpy(&gid, &buffer[i+gidIdx], sizeof(gid)); 
+    memcpy(&gid, &buffer[i+gidIdx], sizeof(gid));
     if (gid == g.gid) {
       // stop since the gaussian already is in the buffer
       return true;
@@ -73,7 +73,19 @@ template<typename G, typename Vec> void evict(Vec &buffer, unsigned idx) {
   insertAt(buffer, idx, g);
 }
 
-class GSplat : public poplar::MultiVertex {
+struct ProjParams {
+  glm::mat4 mvp;
+  glm::mat4 projmatrix;
+  glm::mat4 viewmatrix;
+  glm::vec2 tanfov;
+  glm::vec2 focal;
+};
+
+
+// Single-worker vertex: clears output buffers, reads NEWS input channels,
+// projects Gaussians, routes them via Manhattan routing, builds a sorted
+// Gaussian2D list for the blend phase.
+class RouteVertex : public poplar::Vertex {
 
 public:
   poplar::Input<poplar::Vector<float>> modelView;
@@ -87,12 +99,10 @@ public:
   poplar::Output<poplar::Vector<int>> indices;
   poplar::Output<poplar::Vector<float>> gaus2D;
 
-  poplar::Output<poplar::Vector<unsigned char>> localFb;
-
   poplar::Input<poplar::Vector<float>> rightIn;
   poplar::Output<poplar::Vector<float>> rightOut;
 
-  poplar::Input<poplar::Vector<float>> leftIn; 
+  poplar::Input<poplar::Vector<float>> leftIn;
   poplar::Output<poplar::Vector<float>> leftOut;
 
   poplar::Input<poplar::Vector<float>> upIn;
@@ -103,43 +113,7 @@ public:
 
   float clipSize;
 
-
-  unsigned toByteBufferIndex(float x, float y) {
-    return unsigned(x + y * IPU_TILEWIDTH) * 4;
-  }
-
-  static unsigned char clampToU8(float v) {
-    return (unsigned char)ipu_clamp(v * 255.0f, 0.0f, 255.0f);
-  }
-
-  // Pack RGBX into a single 32-bit word to avoid byte-level
-  // race conditions between workers on the same IPU tile.
-  void setPixel(float x, float y, const ivec4 &colour) {
-    unsigned idx = toByteBufferIndex(x, y);
-    // Read existing pixel as 32-bit word
-    unsigned word;
-    memcpy(&word, &localFb[idx], 4);
-    // Unpack, add, clamp
-    unsigned char r0 = word & 0xFF;
-    unsigned char g0 = (word >> 8) & 0xFF;
-    unsigned char b0 = (word >> 16) & 0xFF;
-    unsigned r = (unsigned)r0 + clampToU8(colour.x);
-    unsigned g = (unsigned)g0 + clampToU8(colour.y);
-    unsigned b = (unsigned)b0 + clampToU8(colour.z);
-    word = (r > 255 ? 255 : r)
-         | ((g > 255 ? 255 : g) << 8)
-         | ((b > 255 ? 255 : b) << 16);
-    memcpy(&localFb[idx], &word, 4);
-  }
-
-  ivec2 viewspaceToTile(const ivec2& pt, ivec2 tlBound) {
-    return {floor(pt.x - tlBound.x), floor(pt.y - tlBound.y)};
-  }
-
   template<typename G> bool send(const G &g, directions dirs) {
-    // if no dirs set then we still return true.. returning true means 
-    // the gaussian is held somewhere. Either this tile or in an out buf. in this case
-    // it will remain in vertsIn since send is never called with evict
     bool sent = true;
     if (dirs.right) {
       sent = sent && insert(rightOut, g);
@@ -169,25 +143,13 @@ public:
     return false;
   }
 
-  void colourFb(const ivec4 &colour, unsigned workerId) {
-    // Write 32-bit words (RGBX) to avoid byte-level races between workers
-    unsigned word = clampToU8(colour.x)
-                  | (clampToU8(colour.y) << 8)
-                  | (clampToU8(colour.z) << 16);
-    const auto startIndex = 4 * workerId;
-    for (auto i = startIndex; i < localFb.size(); i += 4 * numWorkers()) {
-      memcpy(&localFb[i], &word, 4);
-    }
-  }
-
-
   /// Protocol for sending a gaussian to a neighbouring tile
-  /// spreads out left and right from centre in 2 beams, 
+  /// spreads out left and right from centre in 2 beams,
   /// then sends up and down from these beams:
   ///         |||||||||||
   ///         <----o---->
   ///         |||||||||||
-  /// currently sends back at edges, so we render twice... 
+  /// currently sends back at edges, so we render twice...
   template<typename G> bool protocol(const G& g, const directions& sendTo, const direction& recievedFrom) {
     if (recievedFrom == direction::right && sendTo.left) {
       bool ok = sendOnce(g, direction::left);
@@ -270,7 +232,7 @@ public:
       while (top >= 0) {
           h = indices[top--];
           l = indices[top--];
-      
+
           int pi = partition<G>(elements, l, h);
 
           if (pi - 1 > l) {
@@ -286,73 +248,30 @@ public:
   }
 
   template<typename G>
-  void sortBuffer(poplar::Vector<float>& buffer, unsigned end, unsigned workerId = 0u) {
-    if (end < 1 || end >= indices.size() - 1) {
+  void sortBuffer(poplar::Vector<float>& buffer, unsigned end) {
+    if (end < 1 || end >= indices.size()) {
       return;
     }
-    // zero the indices
-    for (auto i = 0u; i < indices.size() - 1; ++i) {
+    for (auto i = 0u; i < indices.size(); ++i) {
       indices[i] = 0;
     }
     iterativeQuickSort<G>(&buffer[0], 0, end);
   }
 
-  void renderTile(const size_t numGaussians, const Bounds2f& tileBounds, const unsigned workerId = 0u) {
-
-    for (auto i = tileBounds.min.x ; i < tileBounds.max.x; ++i) {
-      for (auto j = tileBounds.min.y  + workerId ; j < tileBounds.max.y; j+=numWorkers()) {
-
-        float T = 1.0f;
-        glm::vec4 colour = {0.0f, 0.0f, 0.0f, 0.0f};
-        glm::vec2 pixf = {(float) i, (float) j};
-
-        for (auto gi = 0u; gi < numGaussians; ++gi) {
-          Gaussian2D g = unpack<Gaussian2D>(gaus2D, gi * sizeof(Gaussian2D));
-
-          glm::vec4 gCont = {g.colour.x, g.colour.y, g.colour.z, g.colour.w};
-          // Conic is precomputed once at projection time — no per-pixel invert.
-          const ivec3 conic = g.conic;
-          const float opacity = g.colour.w;
-
-          if (opacity == 0.0f) {
-            continue;
-          }
-          ivec2 d = {g.mean.x - pixf.x, g.mean.y - pixf.y};
-          float power = -0.5f * (conic.x * d.x * d.x + conic.z * d.y * d.y) - conic.y * d.x * d.y;
-          if (power > 0.0f) {
-            continue;
-          }
-
-          float alpha = ipu_min(0.99f, opacity * ipu_exp(power));
-          if (alpha < 1.0f / 255.0f) {
-            continue;
-          }
-          
-          float test_T = T * (1.f - alpha);
-          if (test_T < 0.0001f) {
-              break;
-          }
-
-          colour += gCont * alpha * T;
-          T = test_T;
-        }
-
-
-        // stop blending and apply colour to pixel 
-        ivec4 pixel = {colour.x, colour.y, colour.z, colour.w};
-        auto pxTs = viewspaceToTile({pixf.x, pixf.y}, tileBounds.min);
-        setPixel(pxTs.x, pxTs.y, pixel);
-      }
+  template<typename G, typename Vec> void clearGidOnly(Vec &buffer) {
+    constexpr size_t gidOffset = (sizeof(G) - sizeof(float)) / sizeof(float);
+    float zero = 0.f;
+    for (auto i = 0u; i < buffer.size(); i += sizeof(G)) {
+      memcpy(&buffer[i + gidOffset], &zero, sizeof(float));
     }
   }
 
-  struct ProjParams {
-    glm::mat4 mvp;
-    glm::mat4 projmatrix;
-    glm::mat4 viewmatrix;
-    glm::vec2 tanfov;
-    glm::vec2 focal;
-  };
+  void clearOutBuffers() {
+    clearGidOnly<Gaussian3D>(rightOut);
+    clearGidOnly<Gaussian3D>(leftOut);
+    clearGidOnly<Gaussian3D>(upOut);
+    clearGidOnly<Gaussian3D>(downOut);
+  }
 
   template<typename InternalStorage> unsigned projectAndRoute(InternalStorage& buffer,
                                                               const ProjParams& pp,
@@ -438,13 +357,13 @@ public:
       glm::vec4 glmMean = {g.mean.x, g.mean.y, g.mean.z, 1.0f};
       auto clipSpace = pp.mvp * glmMean;
       auto projMean = vp.clipSpaceToViewport(clipSpace);
-   
+
       if (tb.contains(ivec2{projMean.x, projMean.y})) {
         // anchor arrived so we insert and let
         // render main handle the rest
         bool overflow = !insert(vertsIn, g);
         continue;
-      } 
+      }
 
       // Scale used as-is (matching original 3DGS — no lambda division)
 
@@ -466,7 +385,7 @@ public:
         auto direction = tfb.getBestDirection(curCentre, dstCentre);
         if (!sendOnce(g, direction)) {
           // guard against losing a gaussian
-          // we get here if the out buffer is full but the 
+          // we get here if the out buffer is full but the
           // gaussian is in transit to another tile
         }
         bool overflow = !insert(vertsIn, g);
@@ -485,87 +404,158 @@ public:
       bool overflow = !insert(vertsIn, g);
 
     }
-  } 
-
-  template<typename G, typename Vec> void clearGidOnly(Vec &buffer, unsigned workerId) {
-    constexpr size_t gidOffset = (sizeof(G) - sizeof(float)) / sizeof(float);
-    float zero = 0.f;
-    const auto startIndex = sizeof(G) * workerId;
-    for (auto i = startIndex; i < buffer.size(); i += sizeof(G) * numWorkers()) {
-      memcpy(&buffer[i + gidOffset], &zero, sizeof(float));
-    }
   }
 
-  void clearOutBuffers(unsigned workerId) {
-    clearGidOnly<Gaussian3D>(rightOut, workerId);
-    clearGidOnly<Gaussian3D>(leftOut, workerId);
-    clearGidOnly<Gaussian3D>(upOut, workerId);
-    clearGidOnly<Gaussian3D>(downOut, workerId);
-  }
-
-
-  bool compute(unsigned workerId) {
-
-    auto black = ivec4{0.0f, 0.0f, 0.0f, 0.0f};
-    colourFb(black, workerId);
-    clearOutBuffers(workerId);
+  bool compute() {
+    clearOutBuffers();
 
     const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
     const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
     clipSize = 12.0f;
-    const auto tb = tfb.getTileBounds(tile_id[0]);
 
-    // Barrier counter: monotonically increasing, no reset needed.
-    // sortBuffer zeros indices[0..size-2] but preserves the last element.
-    int barrierIdx = indices.size() - 1;
-    int targetCount = indices[barrierIdx] + 1;
-    unsigned numToRender = 0;
+    // Transpose because GLM storage order is column major:
+    const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
+    const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
 
-    if (workerId == 0) {
-      const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
-      const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
+    float tan_fovy = glm::tan(fxy[0]);
+    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
+    float focal_y = float(tfb.height) / (2.f * tan_fovy);
+    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
 
-      float tan_fovy = glm::tan(fxy[0]);
-      float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
-      float focal_y = float(tfb.height) / (2.f * tan_fovy);
-      float focal_x = float(tfb.width)  / (2.f * tan_fovx);
+    ProjParams pp;
+    pp.mvp = projmatrix * viewmatrix;
+    pp.projmatrix = projmatrix;
+    pp.viewmatrix = viewmatrix;
+    pp.tanfov = {tan_fovx, tan_fovy};
+    pp.focal = {focal_x, focal_y};
 
-      ProjParams pp;
-      pp.mvp = projmatrix * viewmatrix;
-      pp.projmatrix = projmatrix;
-      pp.viewmatrix = viewmatrix;
-      pp.tanfov = {tan_fovx, tan_fovy};
-      pp.focal = {focal_x, focal_y};
+    readInput(rightIn, direction::right, pp, tfb, vp);
+    readInput(leftIn, direction::left, pp, tfb, vp);
+    readInput(upIn, direction::up, pp, tfb, vp);
+    readInput(downIn, direction::down, pp, tfb, vp);
 
-      readInput(rightIn, direction::right, pp, tfb, vp);
-      readInput(leftIn, direction::left, pp, tfb, vp);
-      readInput(upIn, direction::up, pp, tfb, vp);
-      readInput(downIn, direction::down, pp, tfb, vp);
-
-      numToRender = projectAndRoute(vertsIn, pp, tfb, vp);
-
-      if (numToRender > 0) {
-        sortBuffer<Gaussian2D>(gaus2D, numToRender);
-      }
-      splatted[0] = numToRender;
-
-      asm volatile("" ::: "memory");
-      indices[barrierIdx] = targetCount;
-    } else {
-      volatile int* cnt = (volatile int*)&indices[barrierIdx];
-      while (*cnt != targetCount) {
-        asm volatile("" ::: "memory");
-      }
-      numToRender = splatted[0];
-    }
+    unsigned numToRender = projectAndRoute(vertsIn, pp, tfb, vp);
 
     if (numToRender > 0) {
+      sortBuffer<Gaussian2D>(gaus2D, numToRender);
+    }
+    splatted[0] = numToRender;
+
+    return true;
+  }
+
+};
+
+
+// Multi-worker vertex: clears framebuffer and alpha-blends the sorted
+// Gaussian2D list produced by RouteVertex. Pixel rows are distributed
+// across all 6 IPU workers for ~6x parallel speedup on the hot loop.
+class BlendVertex : public poplar::MultiVertex {
+
+public:
+  poplar::Input<poplar::Vector<float>> gaus2D;
+  poplar::Input<poplar::Vector<unsigned>> splatted;
+  poplar::Input<poplar::Vector<int>> tile_id;
+  poplar::Output<poplar::Vector<unsigned char>> localFb;
+
+  unsigned toByteBufferIndex(float x, float y) {
+    return unsigned(x + y * IPU_TILEWIDTH) * 4;
+  }
+
+  static unsigned char clampToU8(float v) {
+    return (unsigned char)ipu_clamp(v * 255.0f, 0.0f, 255.0f);
+  }
+
+  // Pack RGBX into a single 32-bit word to avoid byte-level
+  // race conditions between workers on the same IPU tile.
+  void setPixel(float x, float y, const ivec4 &colour) {
+    unsigned idx = toByteBufferIndex(x, y);
+    // Read existing pixel as 32-bit word
+    unsigned word;
+    memcpy(&word, &localFb[idx], 4);
+    // Unpack, add, clamp
+    unsigned char r0 = word & 0xFF;
+    unsigned char g0 = (word >> 8) & 0xFF;
+    unsigned char b0 = (word >> 16) & 0xFF;
+    unsigned r = (unsigned)r0 + clampToU8(colour.x);
+    unsigned g = (unsigned)g0 + clampToU8(colour.y);
+    unsigned b = (unsigned)b0 + clampToU8(colour.z);
+    word = (r > 255 ? 255 : r)
+         | ((g > 255 ? 255 : g) << 8)
+         | ((b > 255 ? 255 : b) << 16);
+    memcpy(&localFb[idx], &word, 4);
+  }
+
+  ivec2 viewspaceToTile(const ivec2& pt, ivec2 tlBound) {
+    return {floor(pt.x - tlBound.x), floor(pt.y - tlBound.y)};
+  }
+
+  void renderTile(const size_t numGaussians, const Bounds2f& tileBounds, const unsigned workerId) {
+
+    for (auto i = tileBounds.min.x ; i < tileBounds.max.x; ++i) {
+      for (auto j = tileBounds.min.y  + workerId ; j < tileBounds.max.y; j+=numWorkers()) {
+
+        float T = 1.0f;
+        glm::vec4 colour = {0.0f, 0.0f, 0.0f, 0.0f};
+        glm::vec2 pixf = {(float) i, (float) j};
+
+        for (auto gi = 0u; gi < numGaussians; ++gi) {
+          Gaussian2D g = unpack<Gaussian2D>(gaus2D, gi * sizeof(Gaussian2D));
+
+          glm::vec4 gCont = {g.colour.x, g.colour.y, g.colour.z, g.colour.w};
+          // Conic is precomputed once at projection time — no per-pixel invert.
+          const ivec3 conic = g.conic;
+          const float opacity = g.colour.w;
+
+          if (opacity == 0.0f) {
+            continue;
+          }
+          ivec2 d = {g.mean.x - pixf.x, g.mean.y - pixf.y};
+          float power = -0.5f * (conic.x * d.x * d.x + conic.z * d.y * d.y) - conic.y * d.x * d.y;
+          if (power > 0.0f) {
+            continue;
+          }
+
+          float alpha = ipu_min(0.99f, opacity * ipu_exp(power));
+          if (alpha < 1.0f / 255.0f) {
+            continue;
+          }
+
+          float test_T = T * (1.f - alpha);
+          if (test_T < 0.0001f) {
+              break;
+          }
+
+          colour += gCont * alpha * T;
+          T = test_T;
+        }
+
+
+        // stop blending and apply colour to pixel
+        ivec4 pixel = {colour.x, colour.y, colour.z, colour.w};
+        auto pxTs = viewspaceToTile({pixf.x, pixf.y}, tileBounds.min);
+        setPixel(pxTs.x, pxTs.y, pixel);
+      }
+    }
+  }
+
+  bool compute(unsigned workerId) {
+    // Clear framebuffer — distributed across all workers
+    unsigned word = 0;
+    for (auto i = 4u * workerId; i < localFb.size(); i += 4u * numWorkers()) {
+      memcpy(&localFb[i], &word, 4);
+    }
+
+    unsigned numToRender = splatted[0];
+    if (numToRender > 0) {
+      const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
+      const auto tb = tfb.getTileBounds(tile_id[0]);
       renderTile(numToRender, tb, workerId);
     }
 
     return true;
   }
- 
+
 };
 
 
