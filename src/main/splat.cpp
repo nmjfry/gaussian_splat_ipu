@@ -302,40 +302,59 @@ int main(int argc, char** argv) {
   ipuSplatter->updateProjection(projection);
   gm.prepareEngine();
 
-  // --benchmark N: render N frames headlessly with a fixed pose and exit.
+  // --benchmark N: render N frames headlessly at 7 zoom levels and exit.
   const int benchmarkFrames = args["benchmark"].as<int>();
   if (benchmarkFrames > 0) {
-    // Apply the same OpenGL→COLMAP flip used in the interactive loop:
     static const glm::mat4 kFlip = glm::mat4(
         glm::vec4( 1.f,  0.f,  0.f, 0.f),
         glm::vec4( 0.f, -1.f,  0.f, 0.f),
         glm::vec4( 0.f,  0.f, -1.f, 0.f),
         glm::vec4( 0.f,  0.f,  0.f, 1.f));
-    auto benchView = kFlip * viewMatrix;
 
-    ipuSplatter->updateModelView(benchView);
-    ipuSplatter->updateProjection(projection);
-    ipuSplatter->updateFocalLengths(state.fov, 0.f);
+    // Camera starts at 2*radius from scene centre along +Z (OpenGL).
+    // Zoom levels move the camera closer: 1.0 = original, 0.1 = very close.
+    const float zoomLevels[] = {1.0f, 0.7f, 0.5f, 0.35f, 0.25f, 0.15f, 0.1f};
+    const int nZooms = sizeof(zoomLevels) / sizeof(zoomLevels[0]);
+    const float sceneRadius = glm::length(bb.diagonal()) * 0.5f;
 
-    // Warm-up
-    for (int i = 0; i < 5; ++i) {
-      gm.execute(*ipuSplatter);
+    printf("\n%-6s %8s %8s %10s\n", "Zoom", "FPS", "ms/f", "Distance");
+    printf("%-6s %8s %8s %10s\n", "------", "--------", "--------", "----------");
+
+    for (int z = 0; z < nZooms; ++z) {
+      // Translate camera closer along view direction (OpenGL -Z = towards scene)
+      float moveForward = sceneRadius * 2.0f * (1.0f - zoomLevels[z]);
+      glm::mat4 zoomTranslate = glm::translate(glm::mat4(1.0f),
+                                                glm::vec3(0.f, 0.f, moveForward));
+      auto benchView = kFlip * zoomTranslate * viewMatrix;
+
+      ipuSplatter->updateModelView(benchView);
+      ipuSplatter->updateProjection(projection);
+      ipuSplatter->updateFocalLengths(state.fov, 0.f);
+
+      // Warm-up
+      for (int i = 0; i < 5; ++i) {
+        gm.execute(*ipuSplatter);
+      }
+
+      auto t0 = std::chrono::steady_clock::now();
+      for (int i = 0; i < benchmarkFrames; ++i) {
+        gm.execute(*ipuSplatter);
+      }
+      auto t1 = std::chrono::steady_clock::now();
+      double secs = std::chrono::duration<double>(t1 - t0).count();
+      double fps = benchmarkFrames / secs;
+      float camDist = sceneRadius * 2.0f * zoomLevels[z];
+
+      printf("%-6.2f %8.2f %8.3f %10.3f\n",
+             zoomLevels[z], fps, 1000.0 * secs / benchmarkFrames, camDist);
+
+      ipuSplatter->getFrameBuffer(*imagePtr);
+      char fname[64];
+      snprintf(fname, sizeof(fname), "benchmark_zoom_%.2f.png", zoomLevels[z]);
+      cv::imwrite(fname, *imagePtr);
     }
 
-    auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < benchmarkFrames; ++i) {
-      gm.execute(*ipuSplatter);
-    }
-    auto t1 = std::chrono::steady_clock::now();
-    double secs = std::chrono::duration<double>(t1 - t0).count();
-    double fps = benchmarkFrames / secs;
-
-    printf("BENCHMARK: frames=%d total_sec=%.4f fps=%.2f ms_per_frame=%.3f\n",
-           benchmarkFrames, secs, fps, 1000.0 * secs / benchmarkFrames);
-
-    ipuSplatter->getFrameBuffer(*imagePtr);
-    cv::imwrite("benchmark_frame.png", *imagePtr);
-    ipu_utils::logger()->info("Benchmark complete. Saved last frame to benchmark_frame.png");
+    printf("\nSaved 7 frames as benchmark_zoom_*.png\n");
     return EXIT_SUCCESS;
   }
 
