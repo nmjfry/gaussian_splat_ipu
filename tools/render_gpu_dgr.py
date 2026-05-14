@@ -86,22 +86,34 @@ def make_projection(fov_y_deg, aspect, znear=0.01, zfar=100.0):
 
 
 def render(g, V_np, width, height, fov_y_deg, out_path):
+    """One-shot render: rasterise + save PNG. Returns nothing.
+
+    For trajectory benchmarks, use `render_step` instead — it skips the PNG
+    write and exposes a precomputed tensor render path."""
+    img_np = _rasterise(g, V_np, width, height, fov_y_deg).cpu().numpy()
+    img = (img_np * 255).astype(np.uint8)
+    from PIL import Image
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(img).save(out_path)
+    print(f"  -> {out_path}  ({width}x{height})")
+
+
+def _rasterise(g, V_np, width, height, fov_y_deg):
+    """Run DGR for a single view; return the rendered (H, W, 3) tensor on CPU.
+
+    Centralised so the benchmark loop can reuse the exact same call path as
+    the screenshot helper — no skew between bench numbers and the saved PNG.
+    """
     from diff_gaussian_rasterization import (
         GaussianRasterizationSettings, GaussianRasterizer,
     )
-    # The IPU server now emits COLMAP-convention view matrices (matching DGR).
-    # No additional view-space flips needed here.
-
-    # Original 3DGS transposes both matrices before handing them to CUDA.
     aspect = width / float(height)
     P_np, fovX, fovY = make_projection(fov_y_deg, aspect)
 
     V = torch.from_numpy(V_np).cuda()
     P = torch.from_numpy(P_np).cuda()
     world_view_T = V.transpose(0, 1)
-    full_proj_T  = (world_view_T.unsqueeze(0) @ P.transpose(0,1).unsqueeze(0)).squeeze(0)
-
-    # Camera position in world space = inverse(V) * origin.
+    full_proj_T = (world_view_T.unsqueeze(0) @ P.transpose(0, 1).unsqueeze(0)).squeeze(0)
     cam_center = torch.from_numpy(np.linalg.inv(V_np)[:3, 3].copy()).cuda()
 
     bg = torch.zeros(3, device="cuda", dtype=torch.float32)
@@ -114,26 +126,113 @@ def render(g, V_np, width, height, fov_y_deg, out_path):
         prefiltered=False, debug=False,
     )
     rasterizer = GaussianRasterizer(raster_settings=settings)
-
-    # Gradient buffer (unused for inference, but API requires it):
     screenspace = torch.zeros_like(g["means3D"], requires_grad=True)
-
     rendered_image, _radii = rasterizer(
-        means3D=g["means3D"],
-        means2D=screenspace,
-        shs=None,
-        colors_precomp=g["colors"],
-        opacities=g["opacity"],
-        scales=g["scales"],
-        rotations=g["rotations"],
-        cov3D_precomp=None,
+        means3D=g["means3D"], means2D=screenspace,
+        shs=None, colors_precomp=g["colors"],
+        opacities=g["opacity"], scales=g["scales"],
+        rotations=g["rotations"], cov3D_precomp=None,
     )
-    img = (rendered_image.clamp(0, 1).permute(1, 2, 0).detach().cpu().numpy() * 255).astype(np.uint8)
+    return rendered_image.clamp(0, 1).permute(1, 2, 0).detach()
 
-    from PIL import Image
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(img).save(out_path)
-    print(f"  -> {out_path}  ({width}x{height})")
+
+def parse_traj(path):
+    """Read a benchmark_traj_*.traj file. Returns (poses, fov_half_rad, ply).
+
+    poses is a list of (4, 4) numpy view matrices in row-major mathematical
+    form (i.e. each "v" line's 16 GLM column-major floats reshaped to (4, 4)
+    and transposed, exactly the same conversion the existing --view-matrix
+    flag does).
+    """
+    poses = []
+    fov_half = None
+    ply = None
+    with open(path) as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            if s.startswith("fov_half_rad:"):
+                fov_half = float(s.split(":", 1)[1])
+            elif s.startswith("ply:"):
+                ply = s.split(":", 1)[1].strip()
+            elif s.startswith("v "):
+                nums = [float(x) for x in s.split()[1:]]
+                if len(nums) == 16:
+                    V = np.asarray(nums, dtype=np.float32).reshape(4, 4).T
+                    poses.append(V)
+    if not poses:
+        raise SystemExit(f"No 'v <16 floats>' lines in {path}")
+    if fov_half is None:
+        raise SystemExit(f"No fov_half_rad in {path}")
+    return poses, fov_half, ply
+
+
+def run_trajectory_benchmark(g, poses, fov_y_deg, width, height,
+                              spins, out_csv, last_png):
+    """Iterate `spins` full loops of the trajectory, render each frame, log
+    per-frame timing to CSV. Last frame is saved as a sanity-check PNG.
+
+    Timing uses cudaEvent for the rasterisation step (matches the IPU's
+    device-side compute_ms — excludes Python/host overhead) and a wall clock
+    for end-to-end including any Python glue."""
+    import time, csv as csv_mod
+    num_poses = len(poses)
+    total_frames = spins * num_poses
+
+    # Warm-up: lazy CUDA init + DGR JIT compile + cache warmup
+    for _ in range(5):
+        _rasterise(g, poses[0], width, height, fov_y_deg)
+    torch.cuda.synchronize()
+
+    rows = []
+    print(f"GPU trajectory benchmark: {total_frames} frames ({spins} spins x {num_poses} poses)")
+    bench_start = time.perf_counter()
+    last_img = None
+    for f in range(total_frames):
+        V = poses[f % num_poses]
+        ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        wall0 = time.perf_counter()
+        ev0.record()
+        img = _rasterise(g, V, width, height, fov_y_deg)
+        ev1.record()
+        torch.cuda.synchronize()
+        wall1 = time.perf_counter()
+        gpu_ms = ev0.elapsed_time(ev1)        # device-side ms
+        wall_ms = (wall1 - wall0) * 1000.0    # host wall ms incl. Python
+        rows.append((f, f % num_poses, gpu_ms, wall_ms))
+        if f % 60 == 0 or f + 1 == total_frames:
+            print(f"  frame {f+1:4d}/{total_frames}  pose={f % num_poses:4d}  gpu={gpu_ms:6.2f}ms  wall={wall_ms:6.2f}ms")
+        if f + 1 == total_frames:
+            last_img = img
+    bench_end = time.perf_counter()
+    bench_secs = bench_end - bench_start
+    print(f"GPU benchmark done: {total_frames} frames in {bench_secs:.2f}s ({total_frames/bench_secs:.1f} FPS)")
+
+    # CSV with column names compatible with the IPU summariser. The columns
+    # not measured on GPU (per-phase) are left as 0 so the same script reads both.
+    with open(out_csv, "w", newline="") as fh:
+        w = csv_mod.writer(fh)
+        w.writerow(["frame", "pose_idx", "wall_ms", "route_ms", "blend_ms",
+                    "exchange_ms", "total_ms", "mvp_ms",
+                    "clear_min", "clear_mean", "clear_max",
+                    "routing_min", "routing_mean", "routing_max",
+                    "proj_min", "proj_mean", "proj_max",
+                    "sort_min", "sort_mean", "sort_max",
+                    "total_cyc_min", "total_cyc_mean", "total_cyc_max",
+                    "total_visible"])
+        for frame, pose_idx, gpu_ms, wall_ms in rows:
+            w.writerow([frame, pose_idx, f"{wall_ms:.4f}",
+                        0, 0, 0, f"{gpu_ms:.4f}", 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0])
+    print(f"Wrote {out_csv}")
+
+    if last_png and last_img is not None:
+        from PIL import Image
+        img_np = (last_img.cpu().numpy() * 255).astype(np.uint8)
+        Image.fromarray(img_np).save(last_png)
+        print(f"Wrote {last_png}")
 
 
 def main():
@@ -151,11 +250,27 @@ def main():
     p.add_argument("--target", nargs=3, type=float, default=[0, 0, 0])
     p.add_argument("--up",     nargs=3, type=float, default=[0, 1, 0])
     p.add_argument("--benchmark", type=int, default=0,
-                   help="Render N frames and report mean FPS (0 = single render)")
+                   help="Render N frames at the (single) given pose and report mean FPS")
+    p.add_argument("--play-path", default=None,
+                   help="Path to a .traj file from tools/sample_orbit_path.py. "
+                        "Renders every pose in order for --spins full loops; "
+                        "skips --view-matrix/--eye and uses the trajectory's fov.")
+    p.add_argument("--spins", type=int, default=2,
+                   help="Number of trajectory loops for --play-path mode (default 2)")
+    p.add_argument("--out-csv", default=None,
+                   help="--play-path: per-frame timing CSV (default: alongside --out)")
     args = p.parse_args()
 
     print(f"Loading {args.ply} ...")
     g = load_ply(args.ply)
+
+    if args.play_path:
+        poses, fov_half, _ = parse_traj(args.play_path)
+        fov_y_deg = math.degrees(fov_half) * 2.0
+        out_csv = args.out_csv or str(Path(args.out).with_suffix(".csv"))
+        run_trajectory_benchmark(g, poses, fov_y_deg, args.width, args.height,
+                                 args.spins, out_csv, args.out)
+        return
 
     if args.view_matrix:
         nums = [float(x) for x in args.view_matrix.split()]
