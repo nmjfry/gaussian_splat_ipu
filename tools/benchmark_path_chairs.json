@@ -1,0 +1,28 @@
+{
+  "type": "orbit",
+  "look_at": [
+    0.10307450071345786,
+    1.2456671265511294,
+    -0.4090790432497666
+  ],
+  "axis": [
+    0.0,
+    1.0,
+    0.0
+  ],
+  "world_up": [
+    0.0,
+    -1.0,
+    0.0
+  ],
+  "camera_y": 0.7749827705052399,
+  "radius": 1.4067273182877773,
+  "fov_half_rad": 0.524,
+  "ply": "data/chairs.ply",
+  "anchor_a": {
+    "pose": "tools/benchmark_pose_chairs.json",
+    "azimuth_deg": -84.74999931776335
+  },
+  "rotation_direction": -1,
+  "notes": "Orbit inferred from a single calibrated pose by orbit_from_pose.py. look_at source: closest-point-on-ray-to-origin. camera_y / radius come from the anchor pose; axis snapped to +Y."
+}

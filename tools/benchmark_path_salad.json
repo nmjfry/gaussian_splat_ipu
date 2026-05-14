@@ -1,0 +1,28 @@
+{
+  "type": "orbit",
+  "look_at": [
+    -0.35663245063193394,
+    1.1787452363430733,
+    -0.41837935552111727
+  ],
+  "axis": [
+    0.0,
+    1.0,
+    0.0
+  ],
+  "world_up": [
+    0.0,
+    -1.0,
+    0.0
+  ],
+  "camera_y": 0.016953814432469957,
+  "radius": 2.83979651644796,
+  "fov_half_rad": 0.524,
+  "ply": "data/salad.ply",
+  "anchor_a": {
+    "pose": "tools/benchmark_pose_salad.json",
+    "azimuth_deg": -101.75000117234623
+  },
+  "rotation_direction": -1,
+  "notes": "Orbit inferred from a single calibrated pose by orbit_from_pose.py. look_at source: closest-point-on-ray-to-origin. camera_y / radius come from the anchor pose; axis snapped to +Y."
+}

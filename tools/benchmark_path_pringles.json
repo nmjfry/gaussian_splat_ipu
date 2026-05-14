@@ -1,0 +1,21 @@
+{
+  "type": "orbit",
+  "look_at": [-1.417, 0.215, -0.278],
+  "axis": [0.0, 1.0, 0.0],
+  "world_up": [0.0, -1.0, 0.0],
+  "camera_y": 0.012,
+  "radius": 2.97,
+  "fov_half_rad": 0.524,
+  "ply": "data/pringles.ply",
+  "anchor_a": {
+    "pose": "tools/benchmark_pose_pringles.json",
+    "azimuth_deg": -75.8
+  },
+  "anchor_b": {
+    "pose": "tools/benchmark_pose_pringles_b.json",
+    "azimuth_deg": -101.3
+  },
+  "rotation_direction": -1,
+  "measured_span_deg_AB": -25.5,
+  "notes": "Clean orbit around world +Y. look_at is the convergence point of anchor A and B's forward rays (~(-1.42, 0.22, -0.28)) -- not scene origin -- which matches where the user was actually pointing the camera. Camera orbits at y=0.012 (mean of anchor camera Y), radius 2.97 in X-Z plane. Axis snapped from noisy measured axis [-0.014, 0.9998, 0.010] to clean +Y. world_up = -Y because scene loaded with --flip-scene."
+}

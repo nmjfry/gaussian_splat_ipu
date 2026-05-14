@@ -21,7 +21,19 @@
 
 set -e
 
-SPINS="${1:-2}"
+MODE="orbit"
+if [ "${1:-}" = "static" ] || [ "${1:-}" = "orbit" ]; then
+  MODE="$1"
+  shift
+fi
+
+if [ "$MODE" = "static" ]; then
+  COUNT="${1:-2000}"
+  OUTDIR="bench_results_gpu_static"
+else
+  COUNT="${1:-2}"
+  OUTDIR="bench_results_gpu"
+fi
 shift || true
 if [ $# -gt 0 ]; then
   SCENES=("$@")
@@ -29,12 +41,16 @@ else
   SCENES=(pringles sloth chairs salad)
 fi
 
-OUTDIR="bench_results_gpu"
 mkdir -p "$OUTDIR"
 
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -1)
 echo "GPU: ${GPU_NAME:-unknown}"
-echo "Running ${#SCENES[@]} scenes x ${SPINS} spins."
+if [ "$MODE" = "static" ]; then
+  echo "Mode: static (${COUNT} frames per scene)"
+else
+  echo "Mode: orbit (${COUNT} spins per scene)"
+fi
+echo "Scenes: ${SCENES[*]}"
 echo "Output dir: $OUTDIR"
 echo ""
 
@@ -72,12 +88,27 @@ for scene in "${SCENES[@]}"; do
   ) &
   SAMPLE_PID=$!
 
-  python3 tools/render_gpu_dgr.py \
-    --ply "$PLY_PATH" \
-    --out "$SCENE_DIR/benchmark_last_frame.png" \
-    --out-csv "$SCENE_DIR/benchmark_profile.csv" \
-    --play-path "$TRAJ_PATH" \
-    --spins "$SPINS" 2>&1 | tee "$SCENE_DIR/stdout.log"
+  if [ "$MODE" = "static" ]; then
+    POSE_JSON="tools/benchmark_pose_${scene}.json"
+    if [ ! -f "$POSE_JSON" ]; then
+      echo "  ! $POSE_JSON not found, skipping"
+      kill $SAMPLE_PID 2>/dev/null || true
+      continue
+    fi
+    python3 tools/render_gpu_dgr.py \
+      --ply "$PLY_PATH" \
+      --out "$SCENE_DIR/benchmark_last_frame.png" \
+      --out-csv "$SCENE_DIR/benchmark_profile.csv" \
+      --pose-json "$POSE_JSON" \
+      --bench-static "$COUNT" 2>&1 | tee "$SCENE_DIR/stdout.log"
+  else
+    python3 tools/render_gpu_dgr.py \
+      --ply "$PLY_PATH" \
+      --out "$SCENE_DIR/benchmark_last_frame.png" \
+      --out-csv "$SCENE_DIR/benchmark_profile.csv" \
+      --play-path "$TRAJ_PATH" \
+      --spins "$COUNT" 2>&1 | tee "$SCENE_DIR/stdout.log"
+  fi
 
   kill $SAMPLE_PID 2>/dev/null || true
   wait $SAMPLE_PID 2>/dev/null || true

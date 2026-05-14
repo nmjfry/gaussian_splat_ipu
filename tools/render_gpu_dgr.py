@@ -168,6 +168,14 @@ def parse_traj(path):
     return poses, fov_half, ply
 
 
+def run_static_benchmark(g, V_np, fov_y_deg, width, height,
+                          num_frames, out_csv, last_png):
+    """Render `num_frames` frames at a single fixed view. Same CSV schema as
+    run_trajectory_benchmark so static and orbit results can be diffed."""
+    return run_trajectory_benchmark(g, [V_np] * 1, fov_y_deg, width, height,
+                                    num_frames, out_csv, last_png)
+
+
 def run_trajectory_benchmark(g, poses, fov_y_deg, width, height,
                               spins, out_csv, last_png):
     """Iterate `spins` full loops of the trajectory, render each frame, log
@@ -257,8 +265,16 @@ def main():
                         "skips --view-matrix/--eye and uses the trajectory's fov.")
     p.add_argument("--spins", type=int, default=2,
                    help="Number of trajectory loops for --play-path mode (default 2)")
+    p.add_argument("--bench-static", type=int, default=0,
+                   help="Render N frames at a single fixed pose and write per-frame "
+                        "CSV (same schema as --play-path). Requires --pose-json, "
+                        "--view-matrix, or --eye.")
+    p.add_argument("--pose-json", default=None,
+                   help="Load view matrix + fov from a benchmark_pose_*.json file "
+                        "(same format the IPU server's Screenshot button writes).")
     p.add_argument("--out-csv", default=None,
-                   help="--play-path: per-frame timing CSV (default: alongside --out)")
+                   help="--play-path / --bench-static: per-frame timing CSV "
+                        "(default: alongside --out)")
     args = p.parse_args()
 
     print(f"Loading {args.ply} ...")
@@ -270,6 +286,28 @@ def main():
         out_csv = args.out_csv or str(Path(args.out).with_suffix(".csv"))
         run_trajectory_benchmark(g, poses, fov_y_deg, args.width, args.height,
                                  args.spins, out_csv, args.out)
+        return
+
+    if args.bench_static > 0:
+        # Need a view matrix + fov from somewhere
+        fov_y_deg = args.fov_deg
+        if args.pose_json:
+            with open(args.pose_json) as f:
+                pose = json.load(f)
+            nums = pose["view_matrix"]
+            V = np.asarray(nums, dtype=np.float32).reshape(4, 4).T
+            if "fov_half_rad" in pose:
+                fov_y_deg = math.degrees(float(pose["fov_half_rad"])) * 2.0
+        elif args.view_matrix:
+            nums = [float(x) for x in args.view_matrix.split()]
+            V = np.asarray(nums, dtype=np.float32).reshape(4, 4).T
+        elif args.eye:
+            V, _ = look_at(args.eye, args.target, args.up)
+        else:
+            raise SystemExit("--bench-static needs --pose-json, --view-matrix, or --eye")
+        out_csv = args.out_csv or str(Path(args.out).with_suffix(".csv"))
+        run_static_benchmark(g, V, fov_y_deg, args.width, args.height,
+                             args.bench_static, out_csv, args.out)
         return
 
     if args.view_matrix:
