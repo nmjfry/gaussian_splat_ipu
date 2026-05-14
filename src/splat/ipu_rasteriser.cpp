@@ -379,7 +379,7 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
   // settle per frame. K=1 is the original behaviour. K=2-3 halves/thirds
   // the routing spike after a view change. Compute is ~9ms and streaming
   // is the bottleneck, so moderate K values cost little wall-clock time.
-  constexpr unsigned routingRepeats = 2;
+  constexpr unsigned routingRepeats = 1;
 
   program::Sequence substep;
   substep.add(program::Execute(routeCs));
