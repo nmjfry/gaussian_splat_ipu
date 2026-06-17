@@ -680,6 +680,8 @@ int main(int argc, char** argv) {
   auto  dynamicView = viewMatrix;
   float orbitYawAccum = 0.f;
   float orbitPlusPhase = 0.f;  // sine phase for the plus-sign (cross) sweep
+  bool  prevOrbitActive = false;
+  bool  prevOrbitPlus = false;
   size_t playbackFrameIdx = 0;
   do {
     auto startTime = std::chrono::steady_clock::now();
@@ -826,60 +828,65 @@ int main(int argc, char** argv) {
       // large). With all params zero, dynamicView == viewMatrix.
       const float orbitStepCLI = args["orbit"].as<float>();
       bool orbiting = orbitStepCLI != 0.f || state.orbitActive || state.orbitPlus;
+
+      // Reset the sweep accumulators on the rising edge of each toggle so the
+      // motion begins with zero offset (i.e. exactly at the current camera).
+      if (state.orbitActive && !prevOrbitActive) orbitYawAccum = 0.f;
+      if (state.orbitPlus && !prevOrbitPlus)     orbitPlusPhase = 0.f;
+      prevOrbitActive = state.orbitActive;
+      prevOrbitPlus = state.orbitPlus;
+
+      // The current interactive camera (WASD + mouse-look applied). Orbit and
+      // plus modes use THIS as their starting placement, so toggling them on
+      // sweeps around wherever you currently are instead of jumping back to the
+      // initial/from-pose camera.
+      const float sceneScale = glm::length(bb.diagonal());
+      glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
+      glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
+      glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
+                                         -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
+      glm::mat4 interactiveView = R_pitch * R_yaw * T_off * viewMatrix;
+
       if (orbiting) {
-        const float sceneDiag = glm::length(bb.diagonal());
         const glm::vec3 up = state.flipCamera ? -upAxis : upAxis;
-        // Camera position of the placed/initial pose, in world space:
-        const glm::vec3 initCamPos = glm::vec3(glm::inverse(viewMatrix) * glm::vec4(0.f, 0.f, 0.f, 1.f));
+        // Current camera world position = where we start the orbit from:
+        const glm::vec3 baseCamPos = glm::vec3(glm::inverse(interactiveView) * glm::vec4(0.f, 0.f, 0.f, 1.f));
+        const float radius3D  = glm::length(baseCamPos);
+        const float baseYaw   = std::atan2(baseCamPos.x, baseCamPos.z);
+        const float basePitch = std::asin(glm::clamp(baseCamPos.y / radius3D, -1.f, 1.f));
 
+        float yawOff = 0.f, pitchOff = 0.f;
         if (state.orbitPlus) {
-          // Plus-sign (cross) sweep: keep a constant radius around the point
-          // cloud and trace a "+" on the sphere starting from the current
-          // camera placement. First sweep up/down (vertical bar), then
-          // left/right (horizontal bar), looping. Both offsets pass through
-          // zero at the centre so the camera returns to its start between bars.
-          const float radius3D = glm::length(initCamPos);
-          const float baseYaw   = std::atan2(initCamPos.x, initCamPos.z);
-          const float basePitch = std::asin(glm::clamp(initCamPos.y / radius3D, -1.f, 1.f));
-
+          // Plus-sign (cross) sweep: constant radius, trace a "+" on the sphere
+          // starting from the current placement. First sweep up/down (vertical
+          // bar), then left/right (horizontal bar), looping. Both offsets pass
+          // through zero at the centre so the camera returns to its start
+          // between bars.
           constexpr float kPlusSpeedDeg = 3.0f;  // sine-phase advance per frame
           orbitPlusPhase += glm::radians(kPlusSpeedDeg);
           const float twoPi = 2.0f * float(M_PI);
           const long  bar   = static_cast<long>(std::floor(orbitPlusPhase / twoPi));
           const float local = orbitPlusPhase - bar * twoPi;
           const float amp   = glm::radians(state.orbitPlusAmpDeg);
-          float yawOff = 0.f, pitchOff = 0.f;
           if (bar % 2 == 0) pitchOff = amp * std::sin(local);  // vertical bar
           else              yawOff   = amp * std::sin(local);  // horizontal bar
-
-          const float yaw    = baseYaw + yawOff;
-          const float pitch  = glm::clamp(basePitch + pitchOff,
-                                          glm::radians(-89.f), glm::radians(89.f));
-          const float radius = radius3D + state.orbitRadiusOffset * sceneDiag;
-          glm::vec3 eye(radius * std::cos(pitch) * std::sin(yaw),
-                        radius * std::sin(pitch),
-                        radius * std::cos(pitch) * std::cos(yaw));
-          dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
         } else {
           float step = (orbitStepCLI != 0.f) ? orbitStepCLI : 1.0f;
           orbitYawAccum += step;
-          float orbitRad = glm::radians(orbitYawAccum);
-          float baseRadius = glm::length(glm::vec2(initCamPos.x, initCamPos.z));
-          float baseY = initCamPos.y;
-          float radius = baseRadius + state.orbitRadiusOffset * sceneDiag;
-          float pitchRad = glm::radians(state.orbitPitchDeg);
-          float eyeY = baseY + radius * std::sin(pitchRad);
-          float horizR = radius * std::cos(pitchRad);
-          glm::vec3 eye(horizR * std::sin(orbitRad), eyeY, horizR * std::cos(orbitRad));
-          dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
+          yawOff   = glm::radians(orbitYawAccum);
+          pitchOff = glm::radians(state.orbitPitchDeg);
         }
+
+        const float yaw    = baseYaw + yawOff;
+        const float pitch  = glm::clamp(basePitch + pitchOff,
+                                        glm::radians(-89.f), glm::radians(89.f));
+        const float radius = radius3D + state.orbitRadiusOffset * sceneScale;
+        glm::vec3 eye(radius * std::cos(pitch) * std::sin(yaw),
+                      radius * std::sin(pitch),
+                      radius * std::cos(pitch) * std::cos(yaw));
+        dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
       } else {
-        const float sceneScale = glm::length(bb.diagonal());
-        glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
-        glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
-        glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
-                                           -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
-        dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
+        dynamicView = interactiveView;
         if (state.flipCamera) {
           static const glm::mat4 kFlipZ = glm::mat4(
               glm::vec4(-1.f, 0.f,  0.f, 0.f),
