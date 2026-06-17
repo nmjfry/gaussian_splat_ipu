@@ -1,10 +1,12 @@
 // Copyright (c) 2023 Graphcore Ltd. All rights reserved.
 
 #include "glm/matrix.hpp"
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -51,9 +53,35 @@ void addOptions(boost::program_options::options_description& desc) {
   ("from-pose", po::value<std::string>()->default_value(""),
    "Path to a sidecar .json saved by the Screenshot button. Loads the view "
    "matrix and FOV from it so the server starts with that exact pose.")
+  ("play-path", po::value<std::string>()->default_value(""),
+   "Path to a .traj file (see tools/sample_orbit_path.py). When set, the "
+   "server overrides the camera pose each rendered frame with the next pose "
+   "from the trajectory and loops at the end. Client WASD/mouse-look pose "
+   "input is ignored while playback is active (FOV and Stop still work).")
+  ("play", po::bool_switch()->default_value(false),
+   "Auto-find a trajectory matching --input. Looks for "
+   "tools/benchmark_traj_<stem>.traj (or ../tools/...) where <stem> is the "
+   "PLY filename without extension. Equivalent to --play-path with that path.")
   ("benchmark", po::value<int>()->default_value(0),
    "Run N frames headlessly with a fixed pose and report mean FPS, then exit. "
    "No --ui-port needed. Uses initial view or --from-pose if provided.")
+  ("bench-static", po::value<int>()->default_value(0),
+   "Run N frames headlessly at a single fixed pose (from --from-pose or the "
+   "default initial view) and write per-frame timing to benchmark_profile.csv "
+   "in the same schema as the trajectory benchmark. Use this to compare "
+   "fixed-pose throughput against orbit (--play) throughput.")
+  ("bench-no-readback", po::bool_switch()->default_value(false),
+   "Skip device->host readbacks (visible counts + per-tile phase cycles) "
+   "every frame during a trajectory or static benchmark. The last frame's "
+   "framebuffer is still read once at the end. Use this to measure pure "
+   "on-chip compute power, excluding the I/O bandwidth contribution. "
+   "Per-frame visible/phase columns in the CSV will be 0 in this mode.")
+  ("bench-readback-frames", po::bool_switch()->default_value(false),
+   "Also read the full framebuffer (3.6 MB at 1280x720 RGBX) every frame "
+   "during a trajectory or static benchmark. Models the real interactive "
+   "cost where the host needs the pixels each frame; for comparison against "
+   "--bench-no-readback / default (counts+cycles only) the difference in "
+   "power_W and total_ms reveals the framebuffer-readback contribution.")
   ("device-loop", po::bool_switch()->default_value(false),
    "Use RepeatWhileTrue device-side loop for IPU rendering. Eliminates "
    "per-frame host-device barrier for higher throughput.")
@@ -251,6 +279,72 @@ int main(int argc, char** argv) {
     }
   }
 
+  // --play-path: load a flat .traj file (see tools/sample_orbit_path.py) and
+  // play it back, one pose per rendered frame, looping at the end. Trajectory
+  // poses are stored in COLMAP convention (same as --from-pose), so the
+  // playback override skips the OpenGL->COLMAP flip the interactive path uses.
+  // Format: "fov_half_rad: <f>", "ply: <p>" headers, then lines beginning
+  // with "v <16 floats>" — one view matrix per frame in GLM column-major.
+  std::vector<float> playbackPoses;   // 16 floats per pose, flat
+  {
+    std::string playPath = args["play-path"].as<std::string>();
+    if (playPath.empty() && args["play"].as<bool>()) {
+      // Derive from --input: e.g. "../data/sloth.ply" -> stem "sloth".
+      // Try a few candidate locations so this works whether the binary runs
+      // from build/, repo root, or elsewhere.
+      const std::string stem = std::filesystem::path(xyzFile).stem().string();
+      const std::vector<std::string> candidates = {
+        "tools/benchmark_traj_" + stem + ".traj",
+        "../tools/benchmark_traj_" + stem + ".traj",
+      };
+      for (const auto& c : candidates) {
+        if (std::filesystem::exists(c)) { playPath = c; break; }
+      }
+      if (playPath.empty()) {
+        ipu_utils::logger()->warn("--play set but no trajectory found for stem '{}' "
+                                  "(tried {} candidates); playback disabled",
+                                  stem, candidates.size());
+      } else {
+        ipu_utils::logger()->info("--play auto-resolved to {}", playPath);
+      }
+    }
+    if (!playPath.empty()) {
+      std::ifstream f(playPath);
+      if (!f) {
+        ipu_utils::logger()->warn("Could not open --play-path {}; ignoring", playPath);
+      } else {
+        std::string line;
+        while (std::getline(f, line)) {
+          size_t s = line.find_first_not_of(" \t");
+          if (s == std::string::npos || line[s] == '#') continue;
+          if (line.compare(s, 13, "fov_half_rad:") == 0) {
+            try { loadedFovHalfRad = std::stof(line.substr(s + 13)); }
+            catch (...) {}
+          } else if (line[s] == 'v' &&
+                     (s + 1 == line.size() || std::isspace((unsigned char)line[s + 1]))) {
+            std::stringstream ss(line.substr(s + 1));
+            float v;
+            int n = 0;
+            float buf[16];
+            while (n < 16 && ss >> v) buf[n++] = v;
+            if (n == 16) {
+              for (int i = 0; i < 16; ++i) playbackPoses.push_back(buf[i]);
+            }
+          }
+        }
+        const size_t numPoses = playbackPoses.size() / 16;
+        if (loadedFovHalfRad > 0.f) state.fov = loadedFovHalfRad;
+        ipu_utils::logger()->info("--play-path loaded {} poses from {} (fov_half_rad = {})",
+                                  numPoses, playPath, loadedFovHalfRad);
+        if (numPoses == 0) {
+          ipu_utils::logger()->warn("--play-path {} contained no 'v <16 floats>' lines; "
+                                    "playback disabled", playPath);
+          playbackPoses.clear();
+        }
+      }
+    }
+  }
+
   auto uiPort = args.at("ui-port").as<int>();
   if (uiPort) {
     uiServer.reset(new InterfaceServer(uiPort));
@@ -308,10 +402,36 @@ int main(int argc, char** argv) {
   ipuSplatter->updateProjection(projection);
   gm.prepareEngine();
 
+  // --bench-static N: when set without --play, "fake" the trajectory bench by
+  // populating playbackPoses with a single pose = the current viewMatrix
+  // converted to COLMAP convention. The trajectory benchmark below then runs
+  // N full loops through a 1-pose trajectory = N frames at the fixed view.
+  // This shares all the CSV/printing code with the orbit bench so static and
+  // orbit results are directly comparable.
+  const int benchStatic = args["bench-static"].as<int>();
+  int benchmarkSubsteps = args["benchmark"].as<int>();
+  if (benchStatic > 0 && playbackPoses.empty()) {
+    static const glm::mat4 kFlipStatic = glm::mat4(
+        glm::vec4( 1.f,  0.f,  0.f, 0.f),
+        glm::vec4( 0.f, -1.f,  0.f, 0.f),
+        glm::vec4( 0.f,  0.f, -1.f, 0.f),
+        glm::vec4( 0.f,  0.f,  0.f, 1.f));
+    glm::mat4 staticView = kFlipStatic * viewMatrix;
+    for (int c = 0; c < 4; ++c)
+      for (int r = 0; r < 4; ++r)
+        playbackPoses.push_back(staticView[c][r]);
+    benchmarkSubsteps = benchStatic;
+    ipu_utils::logger()->info("--bench-static {}: running {} frames at the fixed initial pose",
+                              benchStatic, benchStatic);
+  }
+
   // --benchmark N: run N substeps per zoom level with per-phase timing and
   // convergence tracking. Outputs CSV with route/blend/exchange breakdown
   // and total visible Gaussian count per substep.
-  const int benchmarkSubsteps = args["benchmark"].as<int>();
+  //
+  // When --play-path / --play is also set, the behaviour changes: N becomes
+  // the number of full trajectory loops (spins), and each frame uses the
+  // next pose from the trajectory. CSV gets one row per frame.
   if (benchmarkSubsteps > 0) {
     static const glm::mat4 kFlip = glm::mat4(
         glm::vec4( 1.f,  0.f,  0.f, 0.f),
@@ -321,6 +441,111 @@ int main(int argc, char** argv) {
 
     // Initialize: first execute connects streams and writes vertices
     gm.execute(*ipuSplatter);
+
+    // Trajectory-driven benchmark: iterate `benchmarkSubsteps` full loops
+    // through the loaded trajectory, one render per pose.
+    if (!playbackPoses.empty()) {
+      const size_t numPoses = playbackPoses.size() / 16;
+      const size_t totalFrames = static_cast<size_t>(benchmarkSubsteps) * numPoses;
+
+      FILE* csv = fopen("benchmark_profile.csv", "w");
+      fprintf(csv, "frame,pose_idx,wall_ms,route_ms,blend_ms,exchange_ms,total_ms,mvp_ms,"
+                   "clear_min,clear_mean,clear_max,"
+                   "routing_min,routing_mean,routing_max,"
+                   "proj_min,proj_mean,proj_max,"
+                   "sort_min,sort_mean,sort_max,"
+                   "total_cyc_min,total_cyc_mean,total_cyc_max,"
+                   "total_visible\n");
+
+      printf("Trajectory benchmark: %zu frames (%d spins x %zu poses)\n",
+             totalFrames, benchmarkSubsteps, numPoses);
+      printf("\n%-7s %4s %9s %9s %9s | %-26s | %-26s | %-26s | %10s\n",
+             "Frame", "Pose", "Route", "Blend", "Total",
+             "  Routing min/mean/max", "  Project min/mean/max", "     Sort min/mean/max", "Visible");
+      printf("%s\n", std::string(140, '-').c_str());
+
+      using clk = std::chrono::steady_clock;
+      auto bench_start = clk::now();
+
+      for (size_t f = 0; f < totalFrames; ++f) {
+        const float* vm = &playbackPoses[16 * (f % numPoses)];
+        glm::mat4 V_colmap(0.f);
+        for (int c = 0; c < 4; ++c)
+          for (int r = 0; r < 4; ++r)
+            V_colmap[c][r] = vm[c * 4 + r];
+
+        // Trajectory poses are already in COLMAP convention -> feed directly.
+        ipuSplatter->updateModelView(V_colmap);
+        ipuSplatter->updateProjection(projection);
+        ipuSplatter->updateFocalLengths(state.fov, 0.f);
+
+        auto t0 = clk::now();
+        ipuSplatter->broadcastMVP();
+        auto t1 = clk::now();
+        double mvp_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        const bool noReadback = args["bench-no-readback"].as<bool>();
+        const bool readbackFrames = args["bench-readback-frames"].as<bool>();
+
+        auto wallStart = clk::now();
+        auto timing = ipuSplatter->runSingleSubstep();
+        if (!noReadback) {
+          ipuSplatter->readbackCounts();
+          ipuSplatter->readbackPhaseCycles();
+        }
+        if (readbackFrames) {
+          ipuSplatter->readbackFramebuffer();
+        }
+        auto wallEnd = clk::now();
+        double wall_ms = std::chrono::duration<double, std::milli>(wallEnd - wallStart).count();
+
+        unsigned totalVisible = noReadback ? 0u : ipuSplatter->getTotalSplatCount();
+        splat::IpuSplatter::CycleBreakdown bd{};
+        if (!noReadback) bd = ipuSplatter->getPhaseCycleStats();
+
+        fprintf(csv, "%zu,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%.4f,"
+                     "%u\n",
+                f, f % numPoses, wall_ms,
+                timing.route_ms, timing.blend_ms, timing.exchange_ms,
+                timing.compute_ms, mvp_ms,
+                bd.clear.min_ms, bd.clear.mean_ms, bd.clear.max_ms,
+                bd.routing.min_ms, bd.routing.mean_ms, bd.routing.max_ms,
+                bd.projection.min_ms, bd.projection.mean_ms, bd.projection.max_ms,
+                bd.sorting.min_ms, bd.sorting.mean_ms, bd.sorting.max_ms,
+                bd.total.min_ms, bd.total.mean_ms, bd.total.max_ms,
+                totalVisible);
+
+        if (f % 60 == 0 || f + 1 == totalFrames) {
+          printf("%-7zu %4zu %9.2f %9.2f %9.2f | %7.2f/%7.2f/%7.2f | %7.2f/%7.2f/%7.2f | %7.3f/%7.3f/%7.3f | %10u\n",
+                 f + 1, f % numPoses,
+                 timing.route_ms, timing.blend_ms, timing.compute_ms,
+                 bd.routing.min_ms, bd.routing.mean_ms, bd.routing.max_ms,
+                 bd.projection.min_ms, bd.projection.mean_ms, bd.projection.max_ms,
+                 bd.sorting.min_ms, bd.sorting.mean_ms, bd.sorting.max_ms,
+                 totalVisible);
+        }
+      }
+
+      auto bench_end = clk::now();
+      double bench_secs = std::chrono::duration<double>(bench_end - bench_start).count();
+      fclose(csv);
+
+      // Save the last rendered frame so the wrapper can verify the scene looked right.
+      ipuSplatter->readbackFramebuffer();
+      ipuSplatter->getFrameBuffer(*imagePtr);
+      cv::imwrite("benchmark_last_frame.png", *imagePtr);
+
+      printf("Trajectory benchmark complete: %zu frames in %.2fs (%.1f FPS).\n",
+             totalFrames, bench_secs, totalFrames / bench_secs);
+      printf("Per-frame timing saved to benchmark_profile.csv\n");
+      printf("Last frame saved to benchmark_last_frame.png\n");
+      return EXIT_SUCCESS;
+    }
 
     const float zoomLevels[] = {1.0f, 1.2f, 1.5f, 2.0f};
     const int nZooms = sizeof(zoomLevels) / sizeof(zoomLevels[0]);
@@ -452,10 +677,25 @@ int main(int argc, char** argv) {
   }
 
   auto  dynamicView = viewMatrix;
+  size_t playbackFrameIdx = 0;
   do {
     auto startTime = std::chrono::steady_clock::now();
     *imagePtr = 0;
     std::uint32_t count = 0u;
+
+    // --play-path: override the camera pose with the next trajectory pose
+    // (already in COLMAP convention) and loop at the end. Runs at the
+    // server's render FPS — more frames in the trajectory = slower playback.
+    if (!playbackPoses.empty()) {
+      const size_t numPoses = playbackPoses.size() / 16;
+      const float* vm = &playbackPoses[16 * (playbackFrameIdx % numPoses)];
+      glm::mat4 V_colmap(0.f);
+      for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r)
+          V_colmap[c][r] = vm[c * 4 + r];
+      dynamicView = V_colmap;
+      ++playbackFrameIdx;
+    }
 
     if (state.device == "cpu") {
       pvti::Tracepoint scoped(&traceChannel, "mvp_transform_cpu");

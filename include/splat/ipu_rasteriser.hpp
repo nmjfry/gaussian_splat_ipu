@@ -54,7 +54,7 @@ public:
   unsigned getTotalSplatCount() const;
 
   struct PhaseStats {
-    double min_ms, mean_ms, max_ms;
+    double min_ms = 0, mean_ms = 0, max_ms = 0;
   };
   struct CycleBreakdown {
     PhaseStats clear, routing, projection, sorting, total;

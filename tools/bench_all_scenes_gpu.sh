@@ -22,7 +22,8 @@
 set -e
 
 MODE="orbit"
-if [ "${1:-}" = "static" ] || [ "${1:-}" = "orbit" ]; then
+if [ "${1:-}" = "static" ] || [ "${1:-}" = "orbit" ] || \
+   [ "${1:-}" = "teleport" ] || [ "${1:-}" = "slow-orbit" ]; then
   MODE="$1"
   shift
 fi
@@ -30,11 +31,23 @@ fi
 if [ "$MODE" = "static" ]; then
   COUNT="${1:-2000}"
   OUTDIR="bench_results_gpu_static"
+  shift || true
+elif [ "$MODE" = "teleport" ]; then
+  NUM_POSES="${1:-40}"
+  HOLD_FRAMES="${2:-30}"
+  OUTDIR="bench_results_gpu_teleport"
+  shift 2 || true
+elif [ "$MODE" = "slow-orbit" ]; then
+  FRAMES_PER_ORBIT="${1:-2880}"
+  SPINS="${2:-1}"
+  OUTDIR="bench_results_gpu_orbit_slow"
+  shift 2 || true
 else
   COUNT="${1:-2}"
   OUTDIR="bench_results_gpu"
+  shift || true
 fi
-shift || true
+
 if [ $# -gt 0 ]; then
   SCENES=("$@")
 else
@@ -47,6 +60,10 @@ GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null
 echo "GPU: ${GPU_NAME:-unknown}"
 if [ "$MODE" = "static" ]; then
   echo "Mode: static (${COUNT} frames per scene)"
+elif [ "$MODE" = "teleport" ]; then
+  echo "Mode: teleport (${NUM_POSES} poses x ${HOLD_FRAMES} held = $((NUM_POSES * HOLD_FRAMES)) frames per scene)"
+elif [ "$MODE" = "slow-orbit" ]; then
+  echo "Mode: slow-orbit (${FRAMES_PER_ORBIT} frames per 360-deg orbit, ${SPINS} spins per scene)"
 else
   echo "Mode: orbit (${COUNT} spins per scene)"
 fi
@@ -101,6 +118,44 @@ for scene in "${SCENES[@]}"; do
       --out-csv "$SCENE_DIR/benchmark_profile.csv" \
       --pose-json "$POSE_JSON" \
       --bench-static "$COUNT" 2>&1 | tee "$SCENE_DIR/stdout.log"
+  elif [ "$MODE" = "teleport" ]; then
+    TELEPORT_TRAJ="tools/benchmark_traj_teleport_${scene}.traj"
+    ORBIT_JSON="tools/benchmark_path_${scene}.json"
+    if [ ! -f "$TELEPORT_TRAJ" ]; then
+      if [ ! -f "$ORBIT_JSON" ]; then
+        echo "  ! $ORBIT_JSON not found, skipping"
+        kill $SAMPLE_PID 2>/dev/null || true
+        continue
+      fi
+      echo "  Generating teleport trajectory: $TELEPORT_TRAJ"
+      python3 tools/sample_teleport_path.py "$ORBIT_JSON" \
+          --out "$TELEPORT_TRAJ" \
+          --num-poses "$NUM_POSES" \
+          --hold-frames "$HOLD_FRAMES"
+    fi
+    python3 tools/render_gpu_dgr.py \
+      --ply "$PLY_PATH" \
+      --out "$SCENE_DIR/benchmark_last_frame.png" \
+      --out-csv "$SCENE_DIR/benchmark_profile.csv" \
+      --play-path "$TELEPORT_TRAJ" \
+      --spins 1 2>&1 | tee "$SCENE_DIR/stdout.log"
+  elif [ "$MODE" = "slow-orbit" ]; then
+    SLOW_TRAJ="tools/benchmark_traj_${scene}_slow${FRAMES_PER_ORBIT}.traj"
+    ORBIT_JSON="tools/benchmark_path_${scene}.json"
+    if [ ! -f "$ORBIT_JSON" ]; then
+      echo "  ! $ORBIT_JSON not found, skipping"
+      kill $SAMPLE_PID 2>/dev/null || true
+      continue
+    fi
+    echo "  Generating slow-orbit trajectory ($FRAMES_PER_ORBIT frames/orbit): $SLOW_TRAJ"
+    python3 tools/sample_orbit_path.py "$ORBIT_JSON" \
+        --out "$SLOW_TRAJ" --frames "$FRAMES_PER_ORBIT" --span-deg 360
+    python3 tools/render_gpu_dgr.py \
+      --ply "$PLY_PATH" \
+      --out "$SCENE_DIR/benchmark_last_frame.png" \
+      --out-csv "$SCENE_DIR/benchmark_profile.csv" \
+      --play-path "$SLOW_TRAJ" \
+      --spins "$SPINS" 2>&1 | tee "$SCENE_DIR/stdout.log"
   else
     python3 tools/render_gpu_dgr.py \
       --ply "$PLY_PATH" \
