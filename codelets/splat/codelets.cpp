@@ -81,6 +81,17 @@ struct ProjParams {
   glm::vec2 focal;
 };
 
+// Bloom routing mode (A/B flag — flip and rebuild to compare flicker):
+//  * true  : "flow-through" — a Gaussian that blooms into a non-anchor tile is
+//            rendered on arrival in readInput and then dropped. The anchor tile
+//            re-blooms every frame so the extent is sustained. This avoids the
+//            ping-pong where every bloomed tile parks the copy in vertsIn and
+//            then ships it back toward the anchor, which scales with the bloom
+//            area (~Gaussian size^2) and saturates the NEWS channels -> flicker.
+//  * false : original behaviour (store bloom copies in vertsIn, re-send toward
+//            anchor in projectAndRoute).
+static constexpr bool kBloomFlowThrough = true;
+
 
 // Single-worker vertex: clears output buffers, reads NEWS input channels,
 // projects Gaussians, routes them via Manhattan routing, builds a sorted
@@ -195,68 +206,32 @@ public:
     return false;
   }
 
-  template <typename G>
-  void swap(float *a, float *b) {
-    G temp;
-    std::memcpy(&temp, a, sizeof(G));
-    std::memcpy(a, b, sizeof(G));
-    std::memcpy(b, &temp, sizeof(G));
-  }
-
-  template <typename G>
-  int partition(float *elements, int low, int high) {
-    high = high * sizeof(G);
-    low = low * sizeof(G);
-    G pivotG;
-    std::memcpy(&pivotG, &elements[high], sizeof(G));
-    float pivot = pivotG.z;
-    int i = low - sizeof(G);
-    for (int j = low; j <= high - sizeof(G); j+=sizeof(G)) {
-        G gm;
-        std::memcpy(&gm, &elements[j], sizeof(G));
-        // Front-to-back: in COLMAP view space, closest = smallest (positive) z.
-        // Sort ASCENDING so front Gaussians composite first.
-        if (gm.z <= pivotG.z) {
-            i+=sizeof(G);
-            swap<G>(&elements[i], &elements[j]);
-        }
-    }
-    swap<G>(&elements[i + sizeof(G)], &elements[high]);
-    return (i + sizeof(G)) / sizeof(G);
-  }
-
-  template <typename G>
-  void iterativeQuickSort(float *elements, int l, int h) {
-      int top = -1;
-      indices[++top] = l;
-      indices[++top] = h;
-      while (top >= 0) {
-          h = indices[top--];
-          l = indices[top--];
-
-          int pi = partition<G>(elements, l, h);
-
-          if (pi - 1 > l) {
-              indices[++top] = l;
-              indices[++top] = pi - 1;
-          }
-
-          if (pi + 1 < h) {
-              indices[++top] = pi + 1;
-              indices[++top] = h;
-          }
-      }
-  }
-
+  // Insertion sort of the first `count` Gaussian2D in `buffer`, ascending by z
+  // (front-to-back: closest = smallest positive z in COLMAP view space). Stride
+  // is sizeof(G) FLOATS, matching the indexing convention used everywhere else.
+  //
+  // Chosen over the previous quicksort because the per-tile lists are small and
+  // almost-sorted frame-to-frame -> O(n) in the common case. It also: (a) needs
+  // no recursion stack, so it can't overrun the `indices` scratch the way the
+  // iterative quicksort could on adversarial input, and (b) sorts exactly
+  // [0, count) — the old code sorted [0, count] inclusive, an off-by-one that
+  // pulled the first empty slot into the sorted range.
   template<typename G>
-  void sortBuffer(poplar::Vector<float>& buffer, unsigned end) {
-    if (end < 1 || end >= indices.size()) {
-      return;
+  void insertionSort(poplar::Vector<float>& buffer, unsigned count) {
+    const unsigned stride = sizeof(G);
+    for (unsigned i = 1; i < count; ++i) {
+      G key;
+      std::memcpy(&key, &buffer[i * stride], sizeof(G));
+      int j = (int)i - 1;
+      while (j >= 0) {
+        G cur;
+        std::memcpy(&cur, &buffer[(unsigned)j * stride], sizeof(G));
+        if (cur.z <= key.z) break;  // strict '>' keeps the sort stable
+        std::memcpy(&buffer[((unsigned)j + 1) * stride], &cur, sizeof(G));
+        --j;
+      }
+      std::memcpy(&buffer[((unsigned)j + 1) * stride], &key, sizeof(G));
     }
-    for (auto i = 0u; i < indices.size(); ++i) {
-      indices[i] = 0;
-    }
-    iterativeQuickSort<G>(&buffer[0], 0, end);
   }
 
   template<typename G, typename Vec> void clearGidOnly(Vec &buffer) {
@@ -277,10 +252,10 @@ public:
   template<typename InternalStorage> unsigned projectAndRoute(InternalStorage& buffer,
                                                               const ProjParams& pp,
                                                               const TiledFramebuffer& tfb,
-                                                              const splat::Viewport& vp) {
+                                                              const splat::Viewport& vp,
+                                                              unsigned toRender) {
     const auto tb = tfb.getTileBounds(tile_id[0]);
 
-    auto toRender = 0u;
     for (auto i = 0; i < buffer.size(); i+=sizeof(Gaussian3D)) {
 
       Gaussian3D g = unpack<Gaussian3D>(buffer, i);
@@ -327,8 +302,12 @@ public:
       // Also near-cull anything with view_z below a small positive threshold.
       if (withinGuardBand && g2D.z > 0.2f) {
         auto g2Idx = toRender * sizeof(Gaussian2D);
-        insertAt(gaus2D, g2Idx, g2D);
-        toRender++;
+        // Only count it if it actually fit: otherwise numToRender would run past
+        // the gaus2D capacity, the sort would be skipped and BlendVertex would
+        // read out of bounds (a flicker source on dense/large-Gaussian tiles).
+        if (insertAt(gaus2D, g2Idx, g2D)) {
+          toRender++;
+        }
       }
     }
 
@@ -339,7 +318,8 @@ public:
                                     const direction& recievedFrom,
                                     const ProjParams& pp,
                                     const TiledFramebuffer& tfb,
-                                    const splat::Viewport& vp) {
+                                    const splat::Viewport& vp,
+                                    unsigned& toRender) {
     // Get the boundary of the current tile's framebuffer section
     const auto tb = tfb.getTileBounds(tile_id[0]);
     const auto tbPrev = tfb.getTileBounds(tfb.getNearbyTile(tile_id[0], recievedFrom));
@@ -393,7 +373,7 @@ public:
         continue;
       }
 
-      // the gaussian is being propagated away from the anchor,
+      // the gaussian is being propagated away from the anchor (bloom),
       // we need to render and pass it on until the extent is fully rendered.
       auto bb = Gaussian2D::BoundingBoxFromCov(projMean2D, cov2D);
 
@@ -401,9 +381,22 @@ public:
         directions sendTo;
         auto clippedBB = bb.clip(tb, sendTo);
         protocol<Gaussian3D>(g, sendTo, recievedFrom);
-      }
-      bool overflow = !insert(vertsIn, g);
 
+        if (kBloomFlowThrough && g2D.z > 0.2f) {
+          // Flow-through: render the bloom copy here on arrival rather than
+          // parking it in vertsIn (which would then be shipped back toward the
+          // anchor every frame). The anchor re-blooms each frame, so the front
+          // stays populated without the ping-pong traffic.
+          auto g2Idx = toRender * sizeof(Gaussian2D);
+          if (insertAt(gaus2D, g2Idx, g2D)) {
+            toRender++;
+          }
+        }
+      }
+
+      if (!kBloomFlowThrough) {
+        bool overflow = !insert(vertsIn, g);
+      }
     }
   }
 
@@ -437,23 +430,26 @@ public:
     unsigned cyc1 = __builtin_ipu_get_scount_l();
 #endif
 
-    readInput(rightIn, direction::right, pp, tfb, vp);
-    readInput(leftIn, direction::left, pp, tfb, vp);
-    readInput(upIn, direction::up, pp, tfb, vp);
-    readInput(downIn, direction::down, pp, tfb, vp);
+    // toRender accumulates across the input channels (bloom flow-through, when
+    // enabled) and then projectAndRoute (anchor-owned + in-transit Gaussians).
+    unsigned numToRender = 0;
+    readInput(rightIn, direction::right, pp, tfb, vp, numToRender);
+    readInput(leftIn, direction::left, pp, tfb, vp, numToRender);
+    readInput(upIn, direction::up, pp, tfb, vp, numToRender);
+    readInput(downIn, direction::down, pp, tfb, vp, numToRender);
 
 #ifdef __IPU__
     unsigned cyc2 = __builtin_ipu_get_scount_l();
 #endif
 
-    unsigned numToRender = projectAndRoute(vertsIn, pp, tfb, vp);
+    numToRender = projectAndRoute(vertsIn, pp, tfb, vp, numToRender);
 
 #ifdef __IPU__
     unsigned cyc3 = __builtin_ipu_get_scount_l();
 #endif
 
-    if (numToRender > 0) {
-      sortBuffer<Gaussian2D>(gaus2D, numToRender);
+    if (numToRender > 1) {
+      insertionSort<Gaussian2D>(gaus2D, numToRender);
     }
     splatted[0] = numToRender;
 
