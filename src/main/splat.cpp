@@ -2,6 +2,7 @@
 
 #include "glm/matrix.hpp"
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -822,15 +823,22 @@ int main(int argc, char** argv) {
       // Scaling the client's offset by the scene diagonal makes WASD motion
       // feel the same regardless of scene units (COLMAP scenes can be tiny or
       // large). With all params zero, dynamicView == viewMatrix.
-      const float orbitStep = args["orbit"].as<float>();
-      if (orbitStep != 0.f) {
-        orbitYawAccum += orbitStep;
+      const float orbitStepCLI = args["orbit"].as<float>();
+      bool orbiting = orbitStepCLI != 0.f || state.orbitActive;
+      if (orbiting) {
+        float step = (orbitStepCLI != 0.f) ? orbitStepCLI : 1.0f;
+        orbitYawAccum += step;
         float orbitRad = glm::radians(orbitYawAccum);
-        glm::vec3 camPos = glm::inverse(viewMatrix) * glm::vec4(0.f, 0.f, 0.f, 1.f);
-        float radius = glm::length(camPos);
-        float camY = camPos.y;
-        glm::vec3 eye(radius * std::sin(orbitRad), camY, radius * std::cos(orbitRad));
-        dynamicView = glm::lookAt(eye, glm::vec3(0.f), upAxis);
+        glm::vec3 initCamPos = glm::vec3(glm::inverse(viewMatrix) * glm::vec4(0.f, 0.f, 0.f, 1.f));
+        float baseRadius = glm::length(glm::vec2(initCamPos.x, initCamPos.z));
+        float baseY = initCamPos.y;
+        float radius = baseRadius + state.orbitRadiusOffset * glm::length(bb.diagonal());
+        float pitchRad = glm::radians(state.orbitPitchDeg);
+        float eyeY = baseY + radius * std::sin(pitchRad);
+        float horizR = radius * std::cos(pitchRad);
+        glm::vec3 eye(horizR * std::sin(orbitRad), eyeY, horizR * std::cos(orbitRad));
+        glm::vec3 up = state.flipCamera ? -upAxis : upAxis;
+        dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
       } else {
         const float sceneScale = glm::length(bb.diagonal());
         glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
@@ -838,6 +846,14 @@ int main(int argc, char** argv) {
         glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
                                            -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
         dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
+        if (state.flipCamera) {
+          static const glm::mat4 kFlipZ = glm::mat4(
+              glm::vec4(-1.f, 0.f,  0.f, 0.f),
+              glm::vec4( 0.f, -1.f, 0.f, 0.f),
+              glm::vec4( 0.f, 0.f,  1.f, 0.f),
+              glm::vec4( 0.f, 0.f,  0.f, 1.f));
+          dynamicView = kFlipZ * dynamicView;
+        }
       }
 
       // Convert OpenGL-style view (camera looks -Z, world +Y up on screen) to

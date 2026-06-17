@@ -212,6 +212,34 @@ class InterfaceServer {
                                         ipu_utils::logger()->info("Screenshot requested by client.");
                                       });
 
+      auto subsOrbitToggle = receiver.subscribe("orbit_toggle",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        bool v = false;
+                                        deserialise(packet, v);
+                                        state.orbitActive = v;
+                                        stateUpdated = true;
+                                      });
+
+      auto subsOrbitPitch = receiver.subscribe("orbit_pitch",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        deserialise(packet, state.orbitPitchDeg);
+                                        stateUpdated = true;
+                                      });
+
+      auto subsOrbitRadius = receiver.subscribe("orbit_radius",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        deserialise(packet, state.orbitRadiusOffset);
+                                        stateUpdated = true;
+                                      });
+
+      auto subsFlipCamera = receiver.subscribe("flip_camera",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        bool v = false;
+                                        deserialise(packet, v);
+                                        state.flipCamera = v;
+                                        stateUpdated = true;
+                                      });
+
       ipu_utils::logger()->info("User interface server entering Tx/Rx loop.");
       syncWithClient(*sender, receiver, "ready");
       serverReady = true;
@@ -251,6 +279,10 @@ public:
     std::string device = "cpu";
     bool stop = false;
     bool detach = false;
+    bool orbitActive = false;
+    float orbitPitchDeg = 0.f;
+    float orbitRadiusOffset = 0.f;
+    bool flipCamera = false;
   };
 
   /// Return a copy of the state and mark it as consumed:
