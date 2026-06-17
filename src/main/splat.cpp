@@ -829,10 +829,11 @@ int main(int argc, char** argv) {
 
       const float sceneScale = glm::length(bb.diagonal());
       glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
-      glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2 + orbitYawAccum), glm::vec3(0.f, 1.f, 0.f));
+      glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
       glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
                                          -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
-      dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
+      glm::mat4 R_orbit = glm::rotate(glm::radians(orbitYawAccum), glm::vec3(0.f, 1.f, 0.f));
+      dynamicView = R_pitch * R_yaw * T_off * viewMatrix * R_orbit;
 
       // Convert OpenGL-style view (camera looks -Z, world +Y up on screen) to
       // COLMAP / 3DGS style (camera looks +Z, world +Y down in view) so the
