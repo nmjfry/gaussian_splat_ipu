@@ -848,17 +848,30 @@ int main(int argc, char** argv) {
       glm::mat4 interactiveView = R_pitch * R_yaw * T_off * viewMatrix;
 
       if (orbiting) {
-        const glm::vec3 up = state.flipCamera ? -upAxis : upAxis;
-        // Current camera world position = where we start the orbit from:
-        const glm::vec3 baseCamPos = glm::vec3(glm::inverse(interactiveView) * glm::vec4(0.f, 0.f, 0.f, 1.f));
-        const float radius3D  = glm::length(baseCamPos);
-        const float baseYaw   = std::atan2(baseCamPos.x, baseCamPos.z);
-        const float basePitch = std::asin(glm::clamp(baseCamPos.y / radius3D, -1.f, 1.f));
+        const glm::vec3 worldUp = upAxis;
+        const glm::vec3 up = state.flipCamera ? -worldUp : worldUp;
+
+        // Current camera world position and gaze direction. We orbit around the
+        // point the camera is currently looking at (a point ahead along the
+        // gaze, at the same distance as the scene centre) — NOT the geometric
+        // centroid. At zero sweep this leaves the camera exactly where it is and
+        // looking the same way, so toggling orbit/plus never jumps the view.
+        const glm::mat4 camToWorld = glm::inverse(interactiveView);
+        const glm::vec3 C = glm::vec3(camToWorld[3]);
+        // OpenGL view convention: camera looks down -Z, so world forward is the
+        // negated third row of the view rotation:
+        const glm::vec3 fwd = -glm::normalize(glm::vec3(interactiveView[0][2],
+                                                        interactiveView[1][2],
+                                                        interactiveView[2][2]));
+        const float dist = glm::length(C) > 1e-4f ? glm::length(C) : sceneScale;
+        const glm::vec3 pivot = C + dist * fwd;
+        glm::vec3 right = glm::cross(fwd, worldUp);
+        if (glm::length(right) < 1e-4f) right = glm::vec3(1.f, 0.f, 0.f);
+        right = glm::normalize(right);
 
         float yawOff = 0.f, pitchOff = 0.f;
         if (state.orbitPlus) {
-          // Plus-sign (cross) sweep: constant radius, trace a "+" on the sphere
-          // starting from the current placement. First sweep up/down (vertical
+          // Plus-sign (cross) sweep around the pivot: first up/down (vertical
           // bar), then left/right (horizontal bar), looping. Both offsets pass
           // through zero at the centre so the camera returns to its start
           // between bars.
@@ -877,14 +890,14 @@ int main(int argc, char** argv) {
           pitchOff = glm::radians(state.orbitPitchDeg);
         }
 
-        const float yaw    = baseYaw + yawOff;
-        const float pitch  = glm::clamp(basePitch + pitchOff,
-                                        glm::radians(-89.f), glm::radians(89.f));
-        const float radius = radius3D + state.orbitRadiusOffset * sceneScale;
-        glm::vec3 eye(radius * std::cos(pitch) * std::sin(yaw),
-                      radius * std::sin(pitch),
-                      radius * std::cos(pitch) * std::cos(yaw));
-        dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
+        // Rotate the (pivot -> camera) vector by the sweep offsets and re-aim:
+        const glm::vec3 vecPC = C - pivot;  // length == dist, points back to cam
+        const glm::mat4 rot = glm::rotate(glm::mat4(1.f), yawOff, worldUp)
+                            * glm::rotate(glm::mat4(1.f), pitchOff, right);
+        const glm::vec3 newPC = glm::vec3(rot * glm::vec4(vecPC, 0.f));
+        const float radius = dist + state.orbitRadiusOffset * sceneScale;
+        const glm::vec3 eye = pivot + glm::normalize(newPC) * radius;
+        dynamicView = glm::lookAt(eye, pivot, up);
       } else {
         dynamicView = interactiveView;
         if (state.flipCamera) {
