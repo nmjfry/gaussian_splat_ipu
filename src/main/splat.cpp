@@ -56,7 +56,10 @@ void addOptions(boost::program_options::options_description& desc) {
    "No --ui-port needed. Uses initial view or --from-pose if provided.")
   ("device-loop", po::bool_switch()->default_value(false),
    "Use RepeatWhileTrue device-side loop for IPU rendering. Eliminates "
-   "per-frame host-device barrier for higher throughput.");
+   "per-frame host-device barrier for higher throughput.")
+  ("orbit", po::value<float>()->default_value(0.f),
+   "Auto-orbit: rotate yaw by this many degrees per frame (e.g. --orbit 1.0 "
+   "for a slow turntable). Overrides client yaw control.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -578,6 +581,11 @@ int main(int argc, char** argv) {
       // Scaling the client's offset by the scene diagonal makes WASD motion
       // feel the same regardless of scene units (COLMAP scenes can be tiny or
       // large). With all params zero, dynamicView == viewMatrix.
+      const float orbitStep = args["orbit"].as<float>();
+      if (orbitStep != 0.f) {
+        state.envRotationDegrees2 += orbitStep;
+      }
+
       const float sceneScale = glm::length(bb.diagonal());
       glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
       glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
