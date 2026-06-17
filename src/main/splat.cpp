@@ -679,6 +679,7 @@ int main(int argc, char** argv) {
 
   auto  dynamicView = viewMatrix;
   float orbitYawAccum = 0.f;
+  float orbitPlusPhase = 0.f;  // sine phase for the plus-sign (cross) sweep
   size_t playbackFrameIdx = 0;
   do {
     auto startTime = std::chrono::steady_clock::now();
@@ -824,21 +825,54 @@ int main(int argc, char** argv) {
       // feel the same regardless of scene units (COLMAP scenes can be tiny or
       // large). With all params zero, dynamicView == viewMatrix.
       const float orbitStepCLI = args["orbit"].as<float>();
-      bool orbiting = orbitStepCLI != 0.f || state.orbitActive;
+      bool orbiting = orbitStepCLI != 0.f || state.orbitActive || state.orbitPlus;
       if (orbiting) {
-        float step = (orbitStepCLI != 0.f) ? orbitStepCLI : 1.0f;
-        orbitYawAccum += step;
-        float orbitRad = glm::radians(orbitYawAccum);
-        glm::vec3 initCamPos = glm::vec3(glm::inverse(viewMatrix) * glm::vec4(0.f, 0.f, 0.f, 1.f));
-        float baseRadius = glm::length(glm::vec2(initCamPos.x, initCamPos.z));
-        float baseY = initCamPos.y;
-        float radius = baseRadius + state.orbitRadiusOffset * glm::length(bb.diagonal());
-        float pitchRad = glm::radians(state.orbitPitchDeg);
-        float eyeY = baseY + radius * std::sin(pitchRad);
-        float horizR = radius * std::cos(pitchRad);
-        glm::vec3 eye(horizR * std::sin(orbitRad), eyeY, horizR * std::cos(orbitRad));
-        glm::vec3 up = state.flipCamera ? -upAxis : upAxis;
-        dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
+        const float sceneDiag = glm::length(bb.diagonal());
+        const glm::vec3 up = state.flipCamera ? -upAxis : upAxis;
+        // Camera position of the placed/initial pose, in world space:
+        const glm::vec3 initCamPos = glm::vec3(glm::inverse(viewMatrix) * glm::vec4(0.f, 0.f, 0.f, 1.f));
+
+        if (state.orbitPlus) {
+          // Plus-sign (cross) sweep: keep a constant radius around the point
+          // cloud and trace a "+" on the sphere starting from the current
+          // camera placement. First sweep up/down (vertical bar), then
+          // left/right (horizontal bar), looping. Both offsets pass through
+          // zero at the centre so the camera returns to its start between bars.
+          const float radius3D = glm::length(initCamPos);
+          const float baseYaw   = std::atan2(initCamPos.x, initCamPos.z);
+          const float basePitch = std::asin(glm::clamp(initCamPos.y / radius3D, -1.f, 1.f));
+
+          constexpr float kPlusSpeedDeg = 3.0f;  // sine-phase advance per frame
+          orbitPlusPhase += glm::radians(kPlusSpeedDeg);
+          const float twoPi = 2.0f * float(M_PI);
+          const long  bar   = static_cast<long>(std::floor(orbitPlusPhase / twoPi));
+          const float local = orbitPlusPhase - bar * twoPi;
+          const float amp   = glm::radians(state.orbitPlusAmpDeg);
+          float yawOff = 0.f, pitchOff = 0.f;
+          if (bar % 2 == 0) pitchOff = amp * std::sin(local);  // vertical bar
+          else              yawOff   = amp * std::sin(local);  // horizontal bar
+
+          const float yaw    = baseYaw + yawOff;
+          const float pitch  = glm::clamp(basePitch + pitchOff,
+                                          glm::radians(-89.f), glm::radians(89.f));
+          const float radius = radius3D + state.orbitRadiusOffset * sceneDiag;
+          glm::vec3 eye(radius * std::cos(pitch) * std::sin(yaw),
+                        radius * std::sin(pitch),
+                        radius * std::cos(pitch) * std::cos(yaw));
+          dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
+        } else {
+          float step = (orbitStepCLI != 0.f) ? orbitStepCLI : 1.0f;
+          orbitYawAccum += step;
+          float orbitRad = glm::radians(orbitYawAccum);
+          float baseRadius = glm::length(glm::vec2(initCamPos.x, initCamPos.z));
+          float baseY = initCamPos.y;
+          float radius = baseRadius + state.orbitRadiusOffset * sceneDiag;
+          float pitchRad = glm::radians(state.orbitPitchDeg);
+          float eyeY = baseY + radius * std::sin(pitchRad);
+          float horizR = radius * std::cos(pitchRad);
+          glm::vec3 eye(horizR * std::sin(orbitRad), eyeY, horizR * std::cos(orbitRad));
+          dynamicView = glm::lookAt(eye, glm::vec3(0.f), up);
+        }
       } else {
         const float sceneScale = glm::length(bb.diagonal());
         glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));

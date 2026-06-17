@@ -46,6 +46,8 @@ const std::vector<std::string> packetTypes {
     "orbit_pitch",         // Orbit pitch offset in degrees (client -> server)
     "orbit_radius",        // Orbit radius offset (client -> server)
     "flip_camera",         // Flip camera 180 deg around view Z (client -> server)
+    "orbit_plus",          // Toggle plus-sign (cross) sweep mode (client -> server)
+    "orbit_plus_amp",      // Plus-sign sweep amplitude in degrees (client -> server)
 };
 
 // Struct and serialize function for HDR
@@ -244,6 +246,20 @@ class InterfaceServer {
                                         stateUpdated = true;
                                       });
 
+      auto subsOrbitPlus = receiver.subscribe("orbit_plus",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        bool v = false;
+                                        deserialise(packet, v);
+                                        state.orbitPlus = v;
+                                        stateUpdated = true;
+                                      });
+
+      auto subsOrbitPlusAmp = receiver.subscribe("orbit_plus_amp",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        deserialise(packet, state.orbitPlusAmpDeg);
+                                        stateUpdated = true;
+                                      });
+
       ipu_utils::logger()->info("User interface server entering Tx/Rx loop.");
       syncWithClient(*sender, receiver, "ready");
       serverReady = true;
@@ -287,6 +303,8 @@ public:
     float orbitPitchDeg = 0.f;
     float orbitRadiusOffset = 0.f;
     bool flipCamera = false;
+    bool orbitPlus = false;       // plus-sign (cross) sweep mode
+    float orbitPlusAmpDeg = 30.f; // amplitude of the cross sweep in degrees
   };
 
   /// Return a copy of the state and mark it as consumed:
