@@ -677,6 +677,7 @@ int main(int argc, char** argv) {
   }
 
   auto  dynamicView = viewMatrix;
+  float orbitYawAccum = 0.f;
   size_t playbackFrameIdx = 0;
   do {
     auto startTime = std::chrono::steady_clock::now();
@@ -823,12 +824,12 @@ int main(int argc, char** argv) {
       // large). With all params zero, dynamicView == viewMatrix.
       const float orbitStep = args["orbit"].as<float>();
       if (orbitStep != 0.f) {
-        state.envRotationDegrees2 += orbitStep;
+        orbitYawAccum += orbitStep;
       }
 
       const float sceneScale = glm::length(bb.diagonal());
       glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
-      glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
+      glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2 + orbitYawAccum), glm::vec3(0.f, 1.f, 0.f));
       glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
                                          -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
       dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
