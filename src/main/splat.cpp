@@ -825,15 +825,20 @@ int main(int argc, char** argv) {
       const float orbitStep = args["orbit"].as<float>();
       if (orbitStep != 0.f) {
         orbitYawAccum += orbitStep;
+        float orbitRad = glm::radians(orbitYawAccum);
+        glm::vec3 camPos = glm::inverse(viewMatrix) * glm::vec4(0.f, 0.f, 0.f, 1.f);
+        float radius = glm::length(camPos);
+        float camY = camPos.y;
+        glm::vec3 eye(radius * std::sin(orbitRad), camY, radius * std::cos(orbitRad));
+        dynamicView = glm::lookAt(eye, glm::vec3(0.f), upAxis);
+      } else {
+        const float sceneScale = glm::length(bb.diagonal());
+        glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
+        glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
+        glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
+                                           -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
+        dynamicView = R_pitch * R_yaw * T_off * viewMatrix;
       }
-
-      const float sceneScale = glm::length(bb.diagonal());
-      glm::mat4 R_pitch = glm::rotate(glm::radians(state.envRotationDegrees),  glm::vec3(1.f, 0.f, 0.f));
-      glm::mat4 R_yaw   = glm::rotate(glm::radians(state.envRotationDegrees2), glm::vec3(0.f, 1.f, 0.f));
-      glm::mat4 T_off   = glm::translate(glm::mat4(1.0f),
-                                         -glm::vec3(state.X, state.Y, state.Z) * sceneScale);
-      glm::mat4 R_orbit = glm::rotate(glm::radians(orbitYawAccum), glm::vec3(0.f, 1.f, 0.f));
-      dynamicView = R_pitch * R_yaw * T_off * viewMatrix * R_orbit;
 
       // Convert OpenGL-style view (camera looks -Z, world +Y up on screen) to
       // COLMAP / 3DGS style (camera looks +Z, world +Y down in view) so the
