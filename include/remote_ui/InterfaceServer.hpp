@@ -42,6 +42,10 @@ const std::vector<std::string> packetTypes {
     "ready",               // Used to sync with the other side once all other subscribers are ready (bi-directional)
     "tile_histogram",      // Histogram tile workload distribution (server -> client)
     "device",              // Tell server which device to use (cpu, ipu) (client -> server)
+    "orbit_toggle",        // Toggle auto-orbit on/off (client -> server)
+    "orbit_pitch",         // Orbit pitch offset in degrees (client -> server)
+    "orbit_radius",        // Orbit radius offset (client -> server)
+    "flip_camera",         // Flip camera 180 deg around view Z (client -> server)
 };
 
 // Struct and serialize function for HDR
