@@ -90,7 +90,9 @@ struct ProjParams {
 //            area (~Gaussian size^2) and saturates the NEWS channels -> flicker.
 //  * false : original behaviour (store bloom copies in vertsIn, re-send toward
 //            anchor in projectAndRoute).
-static constexpr bool kBloomFlowThrough = true;
+// Default OFF so the baseline matches the original fast path; flip to true to
+// A/B the flicker vs the (small) extra per-frame render cost.
+static constexpr bool kBloomFlowThrough = false;
 
 
 // Single-worker vertex: clears output buffers, reads NEWS input channels,
@@ -206,32 +208,75 @@ public:
     return false;
   }
 
-  // Insertion sort of the first `count` Gaussian2D in `buffer`, ascending by z
-  // (front-to-back: closest = smallest positive z in COLMAP view space). Stride
-  // is sizeof(G) FLOATS, matching the indexing convention used everywhere else.
-  //
-  // Chosen over the previous quicksort because the per-tile lists are small and
-  // almost-sorted frame-to-frame -> O(n) in the common case. It also: (a) needs
-  // no recursion stack, so it can't overrun the `indices` scratch the way the
-  // iterative quicksort could on adversarial input, and (b) sorts exactly
-  // [0, count) — the old code sorted [0, count] inclusive, an off-by-one that
-  // pulled the first empty slot into the sorted range.
-  template<typename G>
-  void insertionSort(poplar::Vector<float>& buffer, unsigned count) {
-    const unsigned stride = sizeof(G);
-    for (unsigned i = 1; i < count; ++i) {
-      G key;
-      std::memcpy(&key, &buffer[i * stride], sizeof(G));
-      int j = (int)i - 1;
-      while (j >= 0) {
-        G cur;
-        std::memcpy(&cur, &buffer[(unsigned)j * stride], sizeof(G));
-        if (cur.z <= key.z) break;  // strict '>' keeps the sort stable
-        std::memcpy(&buffer[((unsigned)j + 1) * stride], &cur, sizeof(G));
-        --j;
-      }
-      std::memcpy(&buffer[((unsigned)j + 1) * stride], &key, sizeof(G));
+  template <typename G>
+  void swap(float *a, float *b) {
+    G temp;
+    std::memcpy(&temp, a, sizeof(G));
+    std::memcpy(a, b, sizeof(G));
+    std::memcpy(b, &temp, sizeof(G));
+  }
+
+  template <typename G>
+  int partition(float *elements, int low, int high) {
+    high = high * sizeof(G);
+    low = low * sizeof(G);
+    G pivotG;
+    std::memcpy(&pivotG, &elements[high], sizeof(G));
+    int i = low - (int)sizeof(G);
+    for (int j = low; j <= high - (int)sizeof(G); j+=sizeof(G)) {
+        G gm;
+        std::memcpy(&gm, &elements[j], sizeof(G));
+        // Front-to-back: in COLMAP view space, closest = smallest (positive) z.
+        // Sort ASCENDING so front Gaussians composite first.
+        if (gm.z <= pivotG.z) {
+            i+=sizeof(G);
+            swap<G>(&elements[i], &elements[j]);
+        }
     }
+    swap<G>(&elements[i + (int)sizeof(G)], &elements[high]);
+    return (i + (int)sizeof(G)) / sizeof(G);
+  }
+
+  template <typename G>
+  void iterativeQuickSort(float *elements, int l, int h) {
+      int top = -1;
+      indices[++top] = l;
+      indices[++top] = h;
+      while (top >= 0) {
+          h = indices[top--];
+          l = indices[top--];
+
+          int pi = partition<G>(elements, l, h);
+
+          if (pi - 1 > l) {
+              indices[++top] = l;
+              indices[++top] = pi - 1;
+          }
+
+          if (pi + 1 < h) {
+              indices[++top] = pi + 1;
+              indices[++top] = h;
+          }
+      }
+  }
+
+  // Quicksort the first `count` Gaussian2D in `buffer`, ascending by z
+  // (front-to-back). O(n log n) on the unsorted-each-frame lists we see here
+  // (insertion sort was O(n^2) because the list is built in vertsIn storage
+  // order, not depth order). Sorts exactly [0, count): the previous code passed
+  // `count` as the inclusive high index, pulling one empty slot into the range.
+  template<typename G>
+  void sortBuffer(poplar::Vector<float>& buffer, unsigned count) {
+    if (count < 2) {
+      return;
+    }
+    if (count > indices.size()) {
+      return;  // safety: the toRender clamp keeps count <= capacity
+    }
+    for (auto i = 0u; i < indices.size(); ++i) {
+      indices[i] = 0;
+    }
+    iterativeQuickSort<G>(&buffer[0], 0, (int)count - 1);
   }
 
   template<typename G, typename Vec> void clearGidOnly(Vec &buffer) {
@@ -449,7 +494,7 @@ public:
 #endif
 
     if (numToRender > 1) {
-      insertionSort<Gaussian2D>(gaus2D, numToRender);
+      sortBuffer<Gaussian2D>(gaus2D, numToRender);
     }
     splatted[0] = numToRender;
 
