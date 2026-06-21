@@ -682,6 +682,7 @@ int main(int argc, char** argv) {
   float orbitPlusPhase = 0.f;  // sine phase for the plus-sign (cross) sweep
   bool  prevOrbitActive = false;
   bool  prevOrbitPlus = false;
+  bool  prevOrbitMinus = false;
   size_t playbackFrameIdx = 0;
   do {
     auto startTime = std::chrono::steady_clock::now();
@@ -827,14 +828,16 @@ int main(int argc, char** argv) {
       // feel the same regardless of scene units (COLMAP scenes can be tiny or
       // large). With all params zero, dynamicView == viewMatrix.
       const float orbitStepCLI = args["orbit"].as<float>();
-      bool orbiting = orbitStepCLI != 0.f || state.orbitActive || state.orbitPlus;
+      bool orbiting = orbitStepCLI != 0.f || state.orbitActive || state.orbitPlus || state.orbitMinus;
 
       // Reset the sweep accumulators on the rising edge of each toggle so the
       // motion begins with zero offset (i.e. exactly at the current camera).
       if (state.orbitActive && !prevOrbitActive) orbitYawAccum = 0.f;
       if (state.orbitPlus && !prevOrbitPlus)     orbitPlusPhase = 0.f;
+      if (state.orbitMinus && !prevOrbitMinus)   orbitPlusPhase = 0.f;
       prevOrbitActive = state.orbitActive;
       prevOrbitPlus = state.orbitPlus;
+      prevOrbitMinus = state.orbitMinus;
 
       // The current interactive camera (WASD + mouse-look applied). Orbit and
       // plus modes use THIS as their starting placement, so toggling them on
@@ -876,7 +879,15 @@ int main(int argc, char** argv) {
         const glm::vec3 pivot = C + dist * fwd;
 
         float yawOff = 0.f, pitchOff = 0.f;
-        if (state.orbitPlus) {
+        if (state.orbitMinus) {
+          // Minus sweep: the horizontal half of the plus motion only — a smooth
+          // left/right pan about the pivot. yaw oscillates +/- amplitude, pitch
+          // stays at zero.
+          constexpr float kSweepSpeedDeg = 3.0f;  // sine-phase advance per frame
+          orbitPlusPhase += glm::radians(kSweepSpeedDeg);
+          const float amp = glm::radians(state.orbitMinusAmpDeg);
+          yawOff = amp * std::sin(orbitPlusPhase);
+        } else if (state.orbitPlus) {
           // Plus-sign (cross) sweep around the pivot: first up/down (vertical
           // bar), then left/right (horizontal bar), looping. Both offsets pass
           // through zero at the centre so the camera returns to its start

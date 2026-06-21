@@ -48,6 +48,8 @@ const std::vector<std::string> packetTypes {
     "flip_camera",         // Flip camera 180 deg around view Z (client -> server)
     "orbit_plus",          // Toggle plus-sign (cross) sweep mode (client -> server)
     "orbit_plus_amp",      // Plus-sign sweep amplitude in degrees (client -> server)
+    "orbit_minus",         // Toggle minus (horizontal-only) sweep mode (client -> server)
+    "orbit_minus_amp",     // Minus sweep amplitude in degrees (client -> server)
 };
 
 // Struct and serialize function for HDR
@@ -260,6 +262,20 @@ class InterfaceServer {
                                         stateUpdated = true;
                                       });
 
+      auto subsOrbitMinus = receiver.subscribe("orbit_minus",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        bool v = false;
+                                        deserialise(packet, v);
+                                        state.orbitMinus = v;
+                                        stateUpdated = true;
+                                      });
+
+      auto subsOrbitMinusAmp = receiver.subscribe("orbit_minus_amp",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        deserialise(packet, state.orbitMinusAmpDeg);
+                                        stateUpdated = true;
+                                      });
+
       ipu_utils::logger()->info("User interface server entering Tx/Rx loop.");
       syncWithClient(*sender, receiver, "ready");
       serverReady = true;
@@ -305,6 +321,8 @@ public:
     bool flipCamera = false;
     bool orbitPlus = false;       // plus-sign (cross) sweep mode
     float orbitPlusAmpDeg = 30.f; // amplitude of the cross sweep in degrees
+    bool orbitMinus = false;       // minus (horizontal-only) sweep mode
+    float orbitMinusAmpDeg = 30.f; // amplitude of the horizontal sweep in degrees
   };
 
   /// Return a copy of the state and mark it as consumed:
