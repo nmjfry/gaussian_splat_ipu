@@ -883,7 +883,7 @@ int main(int argc, char** argv) {
           // Minus sweep: the horizontal half of the plus motion only — a smooth
           // left/right pan about the pivot. yaw oscillates +/- amplitude, pitch
           // stays at zero.
-          constexpr float kSweepSpeedDeg = 3.0f;  // sine-phase advance per frame
+          constexpr float kSweepSpeedDeg = 1.5f;  // sine-phase advance per frame
           orbitPlusPhase += glm::radians(kSweepSpeedDeg);
           const float amp = glm::radians(state.orbitMinusAmpDeg);
           yawOff = amp * std::sin(orbitPlusPhase);
@@ -892,7 +892,7 @@ int main(int argc, char** argv) {
           // bar), then left/right (horizontal bar), looping. Both offsets pass
           // through zero at the centre so the camera returns to its start
           // between bars.
-          constexpr float kPlusSpeedDeg = 3.0f;  // sine-phase advance per frame
+          constexpr float kPlusSpeedDeg = 1.5f;  // sine-phase advance per frame
           orbitPlusPhase += glm::radians(kPlusSpeedDeg);
           const float twoPi = 2.0f * float(M_PI);
           const long  bar   = static_cast<long>(std::floor(orbitPlusPhase / twoPi));
