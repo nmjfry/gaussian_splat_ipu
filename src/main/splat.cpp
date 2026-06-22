@@ -683,6 +683,8 @@ int main(int argc, char** argv) {
   bool  prevOrbitActive = false;
   bool  prevOrbitPlus = false;
   bool  prevOrbitMinus = false;
+  bool  loopTracking = false;
+  float loopTargetPhase = 0.f;
   size_t playbackFrameIdx = 0;
   do {
     auto startTime = std::chrono::steady_clock::now();
@@ -839,6 +841,17 @@ int main(int argc, char** argv) {
       prevOrbitPlus = state.orbitPlus;
       prevOrbitMinus = state.orbitMinus;
 
+      {
+        int loopMode = 0;
+        if (uiServer->consumeRecordLoopRequest(loopMode)) {
+          orbitPlusPhase = 0.f;
+          loopTracking = true;
+          loopTargetPhase = (loopMode == 1) ? 4.f * float(M_PI) : 2.f * float(M_PI);
+          if (loopMode == 0) state.orbitMinus = true;
+          else               state.orbitPlus = true;
+        }
+      }
+
       // The current interactive camera (WASD + mouse-look applied). Orbit and
       // plus modes use THIS as their starting placement, so toggling them on
       // sweeps around wherever you currently are instead of jumping back to the
@@ -880,19 +893,12 @@ int main(int argc, char** argv) {
 
         float yawOff = 0.f, pitchOff = 0.f;
         if (state.orbitMinus) {
-          // Minus sweep: the horizontal half of the plus motion only — a smooth
-          // left/right pan about the pivot. yaw oscillates +/- amplitude, pitch
-          // stays at zero.
-          constexpr float kSweepSpeedDeg = 1.5f;  // sine-phase advance per frame
+          const float kSweepSpeedDeg = 1.5f * state.orbitSpeed;
           orbitPlusPhase += glm::radians(kSweepSpeedDeg);
           const float amp = glm::radians(state.orbitMinusAmpDeg);
           yawOff = amp * std::sin(orbitPlusPhase);
         } else if (state.orbitPlus) {
-          // Plus-sign (cross) sweep around the pivot: first up/down (vertical
-          // bar), then left/right (horizontal bar), looping. Both offsets pass
-          // through zero at the centre so the camera returns to its start
-          // between bars.
-          constexpr float kPlusSpeedDeg = 1.5f;  // sine-phase advance per frame
+          const float kPlusSpeedDeg = 1.5f * state.orbitSpeed;
           orbitPlusPhase += glm::radians(kPlusSpeedDeg);
           const float twoPi = 2.0f * float(M_PI);
           const long  bar   = static_cast<long>(std::floor(orbitPlusPhase / twoPi));
@@ -902,6 +908,7 @@ int main(int argc, char** argv) {
           else              yawOff   = amp * std::sin(local);  // horizontal bar
         } else {
           float step = (orbitStepCLI != 0.f) ? orbitStepCLI : 1.0f;
+          step *= state.orbitSpeed;
           orbitYawAccum += step;
           yawOff   = glm::radians(orbitYawAccum);
           pitchOff = glm::radians(state.orbitPitchDeg);
@@ -922,6 +929,11 @@ int main(int argc, char** argv) {
         orbitView = glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, -radiusDelta)) * orbitView;
         if (state.flipCamera) orbitView = kFlipZ * orbitView;
         dynamicView = orbitView;
+
+        if (loopTracking && orbitPlusPhase >= loopTargetPhase) {
+          loopTracking = false;
+          uiServer->sendLoopDone();
+        }
       } else {
         dynamicView = interactiveView;
         if (state.flipCamera) dynamicView = kFlipZ * dynamicView;

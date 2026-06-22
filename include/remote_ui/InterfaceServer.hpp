@@ -50,6 +50,9 @@ const std::vector<std::string> packetTypes {
     "orbit_plus_amp",      // Plus-sign sweep amplitude in degrees (client -> server)
     "orbit_minus",         // Toggle minus (horizontal-only) sweep mode (client -> server)
     "orbit_minus_amp",     // Minus sweep amplitude in degrees (client -> server)
+    "orbit_speed",         // Sweep speed multiplier (client -> server)
+    "record_loop",         // Start recording one full sweep cycle; 0=minus,1=plus (client -> server)
+    "loop_done",           // Server signals one full cycle is complete (server -> client)
 };
 
 // Struct and serialize function for HDR
@@ -276,6 +279,21 @@ class InterfaceServer {
                                         stateUpdated = true;
                                       });
 
+      auto subsOrbitSpeed = receiver.subscribe("orbit_speed",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        deserialise(packet, state.orbitSpeed);
+                                        stateUpdated = true;
+                                      });
+
+      auto subsRecordLoop = receiver.subscribe("record_loop",
+                                      [this](const ComPacket::ConstSharedPacket& packet) {
+                                        float v = 0.f;
+                                        deserialise(packet, v);
+                                        recordLoopMode.store(static_cast<int>(v));
+                                        recordLoopRequested.store(true);
+                                        ipu_utils::logger()->info("Record-loop requested (mode {})", static_cast<int>(v));
+                                      });
+
       ipu_utils::logger()->info("User interface server entering Tx/Rx loop.");
       syncWithClient(*sender, receiver, "ready");
       serverReady = true;
@@ -323,6 +341,7 @@ public:
     float orbitPlusAmpDeg = 30.f; // amplitude of the cross sweep in degrees
     bool orbitMinus = false;       // minus (horizontal-only) sweep mode
     float orbitMinusAmpDeg = 30.f; // amplitude of the horizontal sweep in degrees
+    float orbitSpeed = 1.0f;       // sweep speed multiplier (1.0 = default)
   };
 
   /// Return a copy of the state and mark it as consumed:
@@ -429,6 +448,18 @@ public:
   /// save per click.
   bool consumeScreenshotRequest() { return screenshotRequested.exchange(false); }
 
+  bool consumeRecordLoopRequest(int& mode) {
+    if (recordLoopRequested.exchange(false)) {
+      mode = recordLoopMode.load();
+      return true;
+    }
+    return false;
+  }
+
+  void sendLoopDone() {
+    if (sender) serialise(*sender, "loop_done", true);
+  }
+
   /// Send a raw uncompressed (e.g. HDR) image slowly in chunks in the background:
   bool startSendingRawImage(cv::Mat&& rawImage, std::size_t step) {
     // Wait for any previous tasks to complete:
@@ -496,6 +527,8 @@ private:
   std::atomic<bool> serverReady;
   std::atomic<bool> stateUpdated;
   std::atomic<bool> screenshotRequested{false};
+  std::atomic<bool> recordLoopRequested{false};
+  std::atomic<int>  recordLoopMode{0};
   std::unique_ptr<TcpSocket> connection;
   std::unique_ptr<PacketMuxer> sender;
   std::unique_ptr<LibAvWriter> videoStream;
