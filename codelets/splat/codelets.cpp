@@ -513,6 +513,123 @@ public:
 };
 
 
+// Single-worker vertex for the multiSlice gather render path (branch
+// jdl-experiment, Stage 2). The host has already done discovery + routing:
+// `gathered` holds exactly this tile's Gaussians (those whose 3-sigma bbox
+// overlaps it), tightly packed at sizeof(Gaussian3D)/sizeof(float) floats each
+// (NOT the 60-float stride vertsIn uses). This vertex just projects them,
+// collects the visible subset into `gaus2D`, and sorts — no NEWS, no routing.
+// It writes gaus2D exactly like RouteVertex so BlendVertex is unchanged.
+class GatherProjectVertex : public poplar::Vertex {
+public:
+  poplar::Input<poplar::Vector<float>> modelView;
+  poplar::Input<poplar::Vector<float>> projection;
+  poplar::Input<poplar::Vector<int>> tile_id;
+  poplar::Input<poplar::Vector<float>> fxy;
+  poplar::Input<poplar::Vector<unsigned>> numGathered;  // valid Gaussians for this tile
+  poplar::Input<poplar::Vector<float>> gathered;        // perTile * (sizeof(G)/4) floats
+  poplar::Output<poplar::Vector<int>> indices;          // sort scratch
+  poplar::Output<poplar::Vector<float>> gaus2D;
+  poplar::Output<poplar::Vector<unsigned>> splatted;
+
+  float clipSize;
+
+  // --- sort helpers (duplicated from RouteVertex to avoid touching it) ---
+  template <typename G>
+  void swap(float *a, float *b) {
+    G temp;
+    std::memcpy(&temp, a, sizeof(G));
+    std::memcpy(a, b, sizeof(G));
+    std::memcpy(b, &temp, sizeof(G));
+  }
+
+  template <typename G>
+  int partition(float *elements, int low, int high) {
+    high = high * sizeof(G);
+    low = low * sizeof(G);
+    G pivotG;
+    std::memcpy(&pivotG, &elements[high], sizeof(G));
+    int i = low - (int)sizeof(G);
+    for (int j = low; j <= high - (int)sizeof(G); j += sizeof(G)) {
+      G gm;
+      std::memcpy(&gm, &elements[j], sizeof(G));
+      if (gm.z <= pivotG.z) {
+        i += sizeof(G);
+        swap<G>(&elements[i], &elements[j]);
+      }
+    }
+    swap<G>(&elements[i + (int)sizeof(G)], &elements[high]);
+    return (i + (int)sizeof(G)) / sizeof(G);
+  }
+
+  template <typename G>
+  void iterativeQuickSort(float *elements, int l, int h) {
+    int top = -1;
+    indices[++top] = l;
+    indices[++top] = h;
+    while (top >= 0) {
+      h = indices[top--];
+      l = indices[top--];
+      int pi = partition<G>(elements, l, h);
+      if (pi - 1 > l) { indices[++top] = l; indices[++top] = pi - 1; }
+      if (pi + 1 < h) { indices[++top] = pi + 1; indices[++top] = h; }
+    }
+  }
+
+  template <typename G>
+  void sortBuffer(poplar::Vector<float>& buffer, unsigned count) {
+    if (count < 2) { return; }
+    if (count > indices.size()) { return; }
+    for (auto i = 0u; i < indices.size(); ++i) { indices[i] = 0; }
+    iterativeQuickSort<G>(&buffer[0], 0, (int)count - 1);
+  }
+
+  bool compute() {
+    const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
+    const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
+    clipSize = 12.0f;
+
+    const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
+    const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
+
+    float tan_fovy = glm::tan(fxy[0]);
+    float tan_fovx = tan_fovy * (float(tfb.width) / float(tfb.height));
+    float focal_y = float(tfb.height) / (2.f * tan_fovy);
+    float focal_x = float(tfb.width)  / (2.f * tan_fovx);
+    const glm::mat4 mvp = projmatrix * viewmatrix;
+
+    // Gathered Gaussians are tightly packed (no 60-float stride waste):
+    constexpr unsigned GF = sizeof(Gaussian3D) / sizeof(float);
+    const auto tb = tfb.getTileBounds(tile_id[0]);
+    const unsigned n = numGathered[0];
+
+    unsigned toRender = 0;
+    for (unsigned k = 0; k < n; ++k) {
+      Gaussian3D g;
+      std::memcpy(&g, &gathered[k * GF], sizeof(g));
+      if (g.gid <= 0) { continue; }
+
+      auto clipSpace = mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, 1.0f);
+      auto projMean = vp.clipSpaceToViewport(clipSpace);
+      ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tan_fovx, tan_fovy, focal_x, focal_y);
+      ivec2 projMean2D = {projMean.x, projMean.y};
+      auto bb = Gaussian2D::BoundingBoxFromCov(projMean2D, cov2D);
+      Gaussian2D g2D(projMean2D, g.colour, cov2D, clipSpace.z);
+
+      bool withinGuardBand = bb.diagonal().length() < tb.diagonal().length() * clipSize;
+      if (withinGuardBand && g2D.z > 0.2f) {
+        auto g2Idx = toRender * sizeof(Gaussian2D);
+        if (insertAt(gaus2D, g2Idx, g2D)) { toRender++; }
+      }
+    }
+
+    if (toRender > 1) { sortBuffer<Gaussian2D>(gaus2D, toRender); }
+    splatted[0] = toRender;
+    return true;
+  }
+};
+
+
 // Multi-worker vertex: clears framebuffer and alpha-blends the sorted
 // Gaussian2D list produced by RouteVertex. Pixel rows are distributed
 // across all 6 IPU workers for ~6x parallel speedup on the hot loop.

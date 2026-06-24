@@ -50,3 +50,6 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/src/main)
 # See jdl_multislice_experiment.md.
 add_executable(multislice_bench ${PROJECT_SOURCE_DIR}/tools/multislice_bench.cpp)
 target_link_libraries(multislice_bench ${POPLAR_LINK_LIBRARIES})
+
+# Host-only smoke test for the Stage-2 gather discovery (no IPU needed).
+add_executable(gather_discovery_test ${PROJECT_SOURCE_DIR}/tools/gather_discovery_test.cpp)
