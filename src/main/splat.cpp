@@ -92,7 +92,10 @@ void addOptions(boost::program_options::options_description& desc) {
   ("gather-mode", po::value<std::string>()->default_value("news"),
    "Render path: 'news' (on-chip Manhattan routing, default) or 'multislice' "
    "(host-assisted discovery + popops::multiSlice gather; faster, flicker-free, "
-   "discovery on host). Experimental — branch jdl-experiment.");
+   "discovery on host). Experimental — branch jdl-experiment.")
+  ("gather-cap", po::value<int>()->default_value(400),
+   "Per-tile Gaussian capacity for --gather-mode multislice. Lower = faster but "
+   "drops the farthest Gaussians on dense tiles (e.g. 200).");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -226,7 +229,9 @@ int main(int argc, char** argv) {
   auto ipuSplatter = createIpuBuilder(gsns, fb, args["no-amp"].as<bool>());
   const bool useGather = args["gather-mode"].as<std::string>() == "multislice";
   if (useGather) {
-    ipu_utils::logger()->info("Render path: multiSlice gather (host discovery)");
+    const int cap = args["gather-cap"].as<int>();
+    ipu_utils::logger()->info("Render path: multiSlice gather (host discovery), cap {}", cap);
+    ipuSplatter->setGatherCap((unsigned)cap);
   }
   ipuSplatter->setGatherMode(useGather);
   ipu_utils::GraphManager gm;

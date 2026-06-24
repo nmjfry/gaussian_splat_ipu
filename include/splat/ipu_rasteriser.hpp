@@ -70,6 +70,12 @@ public:
   // (i.e. before GraphManager::compileOrLoad). Default off -> NEWS, untouched.
   void setGatherMode(bool on) { gatherMode = on; }
 
+  // Per-tile gather capacity (== device lookups/tile and blend list cap). Lower
+  // = faster `run` (densest tiles bound the BSP barrier) + smaller upload, at
+  // the cost of dropping the farthest Gaussians on saturated tiles. Must be set
+  // before the graph is built.
+  void setGatherCap(unsigned cap) { gatherPerTile = cap; }
+
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
   void execute(poplar::Engine& engine, const poplar::Device& device) override;

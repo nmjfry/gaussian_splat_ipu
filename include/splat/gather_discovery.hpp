@@ -98,6 +98,15 @@ inline GatherAssignment computeGatherOffsets(std::vector<Gaussian3D>& gaussians,
     if (clip.z <= 0.2f) { ++culled; continue; }  // near-cull (== codelet g2D.z)
 
     const glm::vec2 projMean = vp.clipSpaceToViewport(clip);
+    // Cheap frustum reject BEFORE the expensive ComputeCov2D: a Gaussian whose
+    // mean is more than guardMaxDiag px off-screen cannot have its bbox overlap
+    // the screen (a larger bbox would be guard-band-culled anyway). Skips the
+    // costly cov2D for the many off-to-the-side Gaussians on a zoomed view.
+    if (projMean.x < -guardMaxDiag || projMean.x > IMWIDTH  + guardMaxDiag ||
+        projMean.y < -guardMaxDiag || projMean.y > IMHEIGHT + guardMaxDiag) {
+      ++culled; continue;
+    }
+
     const ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tan_fovx, tan_fovy,
                                        focal_x, focal_y);
     const ivec2 mean2D = { projMean.x, projMean.y };
