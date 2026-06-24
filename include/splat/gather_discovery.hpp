@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -68,19 +69,27 @@ inline GatherAssignment computeGatherOffsets(std::vector<Gaussian3D>& gaussians,
   out.offsets.assign((size_t)numTiles * perTile, 0u);
   out.counts.assign(numTiles, 0u);
 
-  // Parallelised over Gaussians. Each (tile, Gaussian) assignment grabs a slot
-  // in counts[t] with an atomic capture, so different threads write disjoint
-  // offset entries (no data race). counts[t] may overshoot perTile under
-  // saturation; it is clamped afterwards. Compiles + runs serially when OpenMP
-  // is off (the pragmas are simply ignored). NOTE: under threads the order of
-  // assignment within a saturated tile is non-deterministic, so *which*
-  // Gaussians are dropped at the cap can vary frame-to-frame; the device sorts
-  // by depth regardless, so only saturated tiles are affected. See the
-  // depth-priority TODO below.
+  // Per-tile candidate buffers. Pass 1 (parallel over Gaussians) appends every
+  // (tile, Gaussian) candidate with its depth; pass 2 (parallel over tiles)
+  // keeps the perTile NEAREST by (depth, gid). Because the kept set is chosen
+  // by depth — not arrival order — the result is DETERMINISTIC frame-to-frame
+  // even though pass 1 runs in parallel. That removes the saturated-tile
+  // flicker the first-come-drop version had, and drops far Gaussians (which the
+  // front-to-back blend early-outs on) rather than arbitrary ones.
+  //
+  // Cmax bounds the per-tile candidate storage. A tile with more than Cmax
+  // candidates loses the surplus by arrival order (non-deterministic) — but
+  // Cmax = 3*perTile is far above realistic densities, so this is a safety
+  // valve, not the normal path. candDepth/candGi are left uninitialised on
+  // purpose (only [0, count) is written/read).
+  const unsigned Cmax = perTile * 3u;
+  std::vector<unsigned> candCount(numTiles, 0u);
+  std::vector<float>    candDepth((size_t)numTiles * Cmax);
+  std::vector<unsigned> candGi((size_t)numTiles * Cmax);
+
   unsigned culled = 0;
-  unsigned overflow = 0;
   const int n = (int)gaussians.size();
-  #pragma omp parallel for schedule(static) reduction(+ : culled, overflow)
+  #pragma omp parallel for schedule(static) reduction(+ : culled)
   for (int gi = 0; gi < n; ++gi) {
     Gaussian3D& g = gaussians[gi];
     if (g.gid <= 0.f) { continue; }  // padding slot, never a real Gaussian
@@ -111,22 +120,43 @@ inline GatherAssignment computeGatherOffsets(std::vector<Gaussian3D>& gaussians,
         const unsigned t = (unsigned)r * across + (unsigned)c;
         unsigned slot;
         #pragma omp atomic capture
-        { slot = out.counts[t]; out.counts[t] += 1u; }
-        if (slot < perTile) {
-          out.offsets[(size_t)t * perTile + slot] = (unsigned)gi;
-        } else {
-          // TODO(stage2): keep the perTile NEAREST by clip.z instead of
-          // first-come, so dense tiles drop far Gaussians (the front-to-back
-          // blend early-outs on those anyway) — and make drops deterministic.
-          ++overflow;
+        { slot = candCount[t]; candCount[t] += 1u; }
+        if (slot < Cmax) {
+          candDepth[(size_t)t * Cmax + slot] = clip.z;
+          candGi[(size_t)t * Cmax + slot]    = (unsigned)gi;
         }
       }
     }
   }
 
-  for (unsigned t = 0; t < numTiles; ++t) {
-    if (out.counts[t] > perTile) out.counts[t] = perTile;  // clamp overshoot
+  // Pass 2: per tile keep the perTile nearest candidates (deterministic).
+  unsigned overflow = 0;
+  #pragma omp parallel for schedule(dynamic, 16) reduction(+ : overflow)
+  for (int t = 0; t < (int)numTiles; ++t) {
+    const unsigned cnt = std::min(candCount[t], Cmax);
+    if (cnt == 0) continue;
+    const size_t base = (size_t)t * Cmax;
+    const unsigned keep = std::min(cnt, perTile);
+
+    // Order candidate indices by (depth asc, gid asc) so the kept set is the
+    // nearest perTile and the choice is independent of pass-1 arrival order.
+    std::vector<unsigned> idx(cnt);
+    for (unsigned k = 0; k < cnt; ++k) idx[k] = k;
+    auto cmp = [&](unsigned x, unsigned y) {
+      const float dx = candDepth[base + x], dy = candDepth[base + y];
+      if (dx != dy) return dx < dy;
+      return candGi[base + x] < candGi[base + y];  // deterministic tie-break
+    };
+    if (cnt > keep) {
+      std::nth_element(idx.begin(), idx.begin() + keep, idx.end(), cmp);
+      overflow += (cnt - keep);
+    }
+    for (unsigned k = 0; k < keep; ++k) {
+      out.offsets[(size_t)t * perTile + k] = candGi[base + idx[k]];
+    }
+    out.counts[t] = keep;
   }
+
   out.culled = culled;
   out.overflowDrops = overflow;
   return out;
