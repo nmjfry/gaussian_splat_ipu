@@ -58,6 +58,12 @@ int main(int argc, char** argv) {
   Graph graph(target);
   popops::addCodelets(graph);
 
+  if (numTiles > target.getNumTiles()) {
+    std::cerr << "numTiles " << numTiles << " > target tiles "
+              << target.getNumTiles() << "\n";
+    return 1;
+  }
+
   // -- plan + build the gather -- [API]
   // plan(graph, dataType, numEntries, outputSize, numLookupsPerStep, options)
   auto plan = popops::embedding::plan(graph, FLOAT, numGaussians, gaussianFloats,
@@ -69,17 +75,44 @@ int main(int argc, char** argv) {
   Tensor offsets = popops::createIndicesTensor(graph, {0}, numLookups, plan, {}, "offsets");
   graph.createHostWrite("offsets_h", offsets);
 
+  // ---- gather (transport only) ----
   program::Sequence gather;
   Tensor result = popops::multiSlice(graph, table, offsets, {0}, {1}, gather, plan, {},
                                      "gather");
-  std::cerr << "result shape: ";
-  for (auto s : result.shape()) std::cerr << s << " ";
-  std::cerr << "\n";
 
-  program::Sequence main;
-  main.add(program::Repeat(reps, gather));
+  // ---- output mapping: pin each tile's perTile rows onto that tile ----
+  // This is the layout the blend step needs: tile t owns rows [t*perTile,
+  // (t+1)*perTile). The offsets are ordered so result row (t*perTile + k) is
+  // tile t's k-th Gaussian, so reshape + Copy delivers each tile's set to it.
+  Tensor pinned = graph.addVariable(FLOAT, {numTiles, perTile, gaussianFloats}, "pinned");
+  for (unsigned t = 0; t < numTiles; ++t) graph.setTileMapping(pinned[t], t);
 
-  Engine engine(graph, main);
+  program::Sequence gatherAndPin;
+  Tensor result2 = popops::multiSlice(graph, table, offsets, {0}, {1}, gatherAndPin, plan, {},
+                                      "gather2");
+  // result2 is [numLookups, 1, gaussianFloats]; reshape to [numTiles, perTile, gf]
+  // (metadata-only, preserves flat order) then Copy into the per-tile layout.
+  gatherAndPin.add(program::Copy(
+      result2.reshape({numTiles, perTile, gaussianFloats}), pinned));
+
+  // How spread is each layout? Count distinct tiles holding rows.
+  auto countTiles = [&](const Tensor& tn) {
+    auto m = graph.getTileMapping(tn);
+    unsigned n = 0;
+    for (const auto& iv : m) if (!iv.empty()) ++n;
+    return n;
+  };
+  std::cout << "  result spread:  " << countTiles(result) << " tiles (plan-chosen)\n";
+  std::cout << "  pinned spread:  " << countTiles(pinned) << " tiles (1 per render tile)\n";
+
+  program::Sequence mainGather;
+  mainGather.add(program::Repeat(reps, gather));
+  program::Sequence mainPin;
+  mainPin.add(program::Repeat(reps, gatherAndPin));
+
+  // Raw-poplar Engine: a vector of programs, run by index (0 = gather, 1 = pin).
+  std::vector<program::Program> progs = {mainGather, mainPin};
+  Engine engine(graph, progs);
   engine.load(device);
 
   // Random lookup indices (reused every rep — fine for timing the exchange).
@@ -89,19 +122,23 @@ int main(int argc, char** argv) {
   for (auto& o : offs) o = dist(rng);
   engine.writeTensor("offsets_h", offs.data(), offs.data() + offs.size());
 
-  auto t0 = std::chrono::steady_clock::now();
-  engine.run(0);
-  auto t1 = std::chrono::steady_clock::now();
+  auto timeProg = [&](unsigned id) {
+    auto t0 = std::chrono::steady_clock::now();
+    engine.run(id);
+    auto t1 = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
+  };
 
-  double totalMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-  double perGatherMs = totalMs / reps;
+  double gatherMs = timeProg(0);
+  double pinMs    = timeProg(1);
   double bytes = double(numLookups) * gaussianFloats * sizeof(float);
+  double mib = bytes / (1024.0 * 1024.0);
 
-  std::cout << "  total wall: " << totalMs << " ms over " << reps << " reps\n";
-  std::cout << "  per gather: " << perGatherMs << " ms\n";
-  std::cout << "  gathered:   " << (bytes / (1024.0 * 1024.0)) << " MiB/gather, "
-            << (bytes / (1024.0 * 1024.0) / (perGatherMs / 1000.0)) << " MiB/s\n";
-  std::cout << "Compare per-gather ms against the NEWS `single_exchange` time "
+  std::cout << "\n  gather only:      " << gatherMs << " ms/frame ("
+            << (mib / (gatherMs / 1000.0)) << " MiB/s)\n";
+  std::cout << "  gather + pin:     " << pinMs << " ms/frame\n";
+  std::cout << "  pin (rearrange):  " << (pinMs - gatherMs) << " ms/frame\n";
+  std::cout << "Compare gather+pin ms against the NEWS `single_exchange` time "
                "from `--benchmark`.\n";
   return 0;
 }

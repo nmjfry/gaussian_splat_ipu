@@ -78,6 +78,23 @@ is comparable to or cheaper than the NEWS exchange *and* the result fits in
 SRAM, proceed to Stage 2. If it's much slower, the experiment validates the
 paper's local-message-passing choice — also a useful rebuttal result.
 
+### Stage 1 result (SDK 3.3, C600, 2026-06-24) — GREEN
+```
+table:   44000 entries x 15 floats
+lookups: 576000 (1440 tiles x 400)   # full per-frame working set
+per gather: 0.238 ms   (32.96 MiB/gather, ~138 GB/s — near exchange-fabric peak)
+```
+Transport is ~40x under the ~9 ms/frame compute and well under the NEWS
+exchange. **Dynamic-lookup transport is not the bottleneck.** Proceed to
+Stage 2 — but note this measures *only* the gather, with indices supplied. It
+does NOT yet include:
+1. **Discovery** — computing each tile's needed global indices (the memory
+   wall above is still the open problem).
+2. **Output mapping** — `multiSlice`'s output layout is plan-controlled. For
+   blending, each tile's gathered Gaussians must land *on that tile*. Whether
+   the plan can pin per-tile outputs (or at what cost) is the next unknown to
+   test before/with Stage 2.
+
 ## Stage 2 — renderer integration (only if Stage 1 is green)
 Behind a runtime flag `--gather-mode news|multislice` (default `news`, so the
 working renderer is untouched). Replace `broadcastPoints` + the routing half of
