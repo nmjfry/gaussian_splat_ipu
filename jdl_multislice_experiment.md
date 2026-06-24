@@ -85,15 +85,29 @@ lookups: 576000 (1440 tiles x 400)   # full per-frame working set
 per gather: 0.238 ms   (32.96 MiB/gather, ~138 GB/s — near exchange-fabric peak)
 ```
 Transport is ~40x under the ~9 ms/frame compute and well under the NEWS
-exchange. **Dynamic-lookup transport is not the bottleneck.** Proceed to
-Stage 2 — but note this measures *only* the gather, with indices supplied. It
-does NOT yet include:
-1. **Discovery** — computing each tile's needed global indices (the memory
-   wall above is still the open problem).
-2. **Output mapping** — `multiSlice`'s output layout is plan-controlled. For
-   blending, each tile's gathered Gaussians must land *on that tile*. Whether
-   the plan can pin per-tile outputs (or at what cost) is the next unknown to
-   test before/with Stage 2.
+exchange. **Dynamic-lookup transport is not the bottleneck.**
+
+### Stage 1b — output mapping (2026-06-24) — GREEN
+Added a second program: gather, then `Copy` the plan-scattered output into a
+tensor pinned 400-rows-per-tile across all 1440 tiles (the blend layout).
+```
+result spread:  1416 tiles    # the embedding plan already spreads output ~per-tile
+pinned spread:  1440 tiles
+gather only:      0.2387 ms/frame
+gather + pin:     0.2443 ms/frame
+pin (rearrange):  0.0056 ms/frame   # forcing exact per-tile placement is ~free
+```
+The plan natively distributes the gather across ~all tiles, and pinning to
+exact tiles costs 5.6 us. **Output mapping is solved — the global multiSlice is
+the right shape (not per-tile gathers).**
+
+### Remaining blocker: discovery only
+Both transport gates are green. The ONLY unsolved problem is **discovery** —
+computing each tile's needed global indices within the 624 KB SRAM budget (the
+full-footprint AllGather doesn't fit). Stage 2 sidesteps this by computing the
+assignment on the host (already done for CPU mode) and streaming the offsets
+down — a clean, switchable proof of the speedup + flicker removal, with
+on-chip discovery left as the hard follow-up.
 
 ## Stage 2 — renderer integration (only if Stage 1 is green)
 Behind a runtime flag `--gather-mode news|multislice` (default `news`, so the
