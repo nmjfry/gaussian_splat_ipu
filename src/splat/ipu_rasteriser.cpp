@@ -3,6 +3,7 @@
 #include <splat/ipu_rasteriser.hpp>
 #include <splat/geometry.hpp>
 #include <ipu/io_utils.hpp>
+#include <cstring>
 #include <opencv2/highgui.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -11,8 +12,10 @@
 #include <popops/codelets.hpp>
 #include <popops/TopK.hpp>
 #include <popops/Fill.hpp>
+#include <popops/DynamicSlice.hpp>
 
 #include <tileMapping/edge_builder.hpp>
+#include <splat/gather_discovery.hpp>
 
 using namespace poplar;
 
@@ -57,6 +60,8 @@ IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAM
     disableAMPVertices(noAMP),
     fbMapping(fb)
 {
+  gaussiansHost = verts;  // kept for per-frame host discovery in gather mode
+
   auto elemSize = sizeof(verts[0]);
   hostVertices.reserve(elemSize * verts.size());
   printf("num verts in: %lu, elemsize: %lu \n", verts.size(), elemSize);
@@ -80,6 +85,7 @@ IpuSplatter::IpuSplatter(const Gaussians& verts, TiledFramebuffer& fb, bool noAM
 
 
 void IpuSplatter::updateModelView(const glm::mat4& mv) {
+  currentView = mv;  // codelet reconstructs exactly this; host discovery needs it
   auto mvt = glm::transpose(mv);
   auto ptr = (const float*)glm::value_ptr(mvt);
   for (auto i = 0u; i < hostModelView.size(); ++i) {
@@ -89,6 +95,7 @@ void IpuSplatter::updateModelView(const glm::mat4& mv) {
 }
 
 void IpuSplatter::updateProjection(const glm::mat4& mp) {
+  currentProj = mp;
   auto mpt = glm::transpose(mp);
   auto ptr = (const float*)glm::value_ptr(mpt);
   for (auto i = 0u; i < hostProjection.size(); ++i) {
@@ -102,6 +109,7 @@ void IpuSplatter::getIPUHistogram(std::vector<u_int32_t>& counts) const {
 }
 
 void IpuSplatter::updateFocalLengths(float fx, float fy) {
+  currentFov = fx;  // half-FOV in radians (fxy[0] in the codelet)
   fxyHost = {fx, fy};
 }
 
@@ -204,6 +212,8 @@ void applyTileMapping(poplar::Graph& g, const poplar::Tensor& paddedInput, const
 
 
 void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
+  if (gatherMode) { buildGatherPath(graph, target); return; }
+
   auto vg = graph.createVirtualGraph(0u, fbMapping.numTiles);
 
   const auto codeletFile = std::string(POPC_PREFIX) + "/codelets/splat/codelets.cpp";
@@ -430,6 +440,8 @@ void IpuSplatter::build(poplar::Graph& graph, const poplar::Target& target) {
 }
 
 void IpuSplatter::execute(poplar::Engine& engine, const poplar::Device& device) {
+  if (gatherMode) { executeGather(engine, device); return; }
+
   if (!initialised) {
     initialised = true;
     enginePtr = &engine;
@@ -546,6 +558,178 @@ void IpuSplatter::stopDeviceLoop() {
     }
     deviceLoopRunning = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: multiSlice gather render path (branch jdl-experiment).
+//
+// Discovery is done on the host each frame (computeGatherOffsets): every
+// Gaussian is assigned to the tiles its 3-sigma bbox overlaps, producing a
+// per-tile list of global indices. The device then:
+//   1. multiSlice-gathers each tile's Gaussians from a sliceable table,
+//   2. pins them onto the owning tile (Copy into a per-tile tensor),
+//   3. projects + sorts them (GatherProjectVertex),
+//   4. alpha-blends (BlendVertex, unchanged).
+// No NEWS channels, no routing, no multi-substep convergence -> no flicker,
+// instant settle. The trade is that discovery runs on the host (the deliberate
+// "fully on-chip -> NEWS; this speed-up -> host discovery + gather" choice).
+//
+// Built on the top-level `graph` (not a virtual graph) so popops' multiSlice
+// planning sees the real target; per-tile work is mapped to tiles [0, numTiles).
+// This is a first integration cut — expect to compile-iterate on the container.
+// ---------------------------------------------------------------------------
+void IpuSplatter::buildGatherPath(poplar::Graph& graph, const poplar::Target& target) {
+  using namespace poplar;
+  const unsigned numTiles    = (unsigned)fbMapping.numTiles;
+  const unsigned perTile     = gatherPerTile;
+  constexpr unsigned GF      = sizeof(Gaussian3D) / sizeof(float);   // 15
+  const unsigned numGaussians = (unsigned)gaussiansHost.size();
+  const unsigned numLookups  = numTiles * perTile;
+
+  ipu_utils::logger()->info("Gather path: {} gaussians, {} tiles, {}/tile, {} lookups",
+                            numGaussians, numTiles, perTile, numLookups);
+
+  popops::addCodelets(graph);
+  const auto codeletFile   = std::string(POPC_PREFIX) + "/codelets/splat/codelets.cpp";
+  const auto glmPath       = std::string(POPC_PREFIX) + "/external/glm/";
+  const auto mathPath      = std::string(POPC_PREFIX) + "/include/math";
+  const auto otherIncludes = std::string(POPC_PREFIX) + "/include/missing";
+  const auto tileMapping   = std::string(POPC_PREFIX) + "/include/tileMapping";
+  const auto includes = " -I " + glmPath + " -I " + mathPath + " -I " + otherIncludes + " -I " + tileMapping;
+  graph.addCodelets(codeletFile, poplar::CodeletFileType::Auto, "-O3 -finline-functions -funroll-loops" + includes);
+
+  // --- MVP master tensors (host-written each frame) + per-tile broadcast ---
+  Tensor mvMaster = graph.addVariable(FLOAT, {16}, "g_mv_master");
+  Tensor mpMaster = graph.addVariable(FLOAT, {16}, "g_mp_master");
+  Tensor fxyMaster = graph.addVariable(FLOAT, {2}, "g_fxy_master");
+  graph.setTileMapping(mvMaster, 0u);
+  graph.setTileMapping(mpMaster, 0u);
+  graph.setTileMapping(fxyMaster, 0u);
+  graph.createHostWrite("g_mv_h", mvMaster);
+  graph.createHostWrite("g_mp_h", mpMaster);
+  graph.createHostWrite("g_fxy_h", fxyMaster);
+
+  program::Sequence broadcastMvp;
+
+  // --- framebuffer (same tiled layout as the NEWS path) ---
+  auto fbToTileMapping = calculateMapping(graph, frameBuffer.size(), 4, fbMapping);
+  auto paddedFramebuffer = graph.addVariable(UNSIGNED_CHAR,
+      {frameBuffer.size() + fbToTileMapping.padding}, "g_padded_fb");
+  applyTileMapping(graph, paddedFramebuffer, fbToTileMapping);
+  auto outFb = paddedFramebuffer.slice(0, frameBuffer.size());
+  graph.createHostRead("g_fb_h", outFb);
+  const auto tmFb = graph.getTileMapping(paddedFramebuffer);
+
+  // --- sliceable Gaussian table + per-frame offsets/counts ---
+  auto plan = popops::embedding::plan(graph, FLOAT, numGaussians, GF, {numLookups}, {});
+  Tensor table = popops::createSliceableTensor(graph, FLOAT, {numGaussians, GF},
+                                               {0}, {1}, plan, {}, "g_table");
+  graph.createHostWrite("g_table_h", table);
+
+  Tensor offsets = popops::createIndicesTensor(graph, {0}, numLookups, plan, {}, "g_offsets");
+  graph.createHostWrite("g_offsets_h", offsets);
+
+  Tensor counts = graph.addVariable(UNSIGNED_INT, {numTiles}, "g_counts");
+  for (unsigned t = 0; t < numTiles; ++t) graph.setTileMapping(counts[t], t);
+  graph.createHostWrite("g_counts_h", counts);
+
+  // --- gather program: multiSlice -> pin to [numTiles, perTile, GF] ---
+  program::Sequence gatherProg;
+  Tensor gathered = popops::multiSlice(graph, table, offsets, {0}, {1}, gatherProg, plan, {}, "g_gather");
+  Tensor pinned = graph.addVariable(FLOAT, {numTiles, perTile, GF}, "g_pinned");
+  for (unsigned t = 0; t < numTiles; ++t) graph.setTileMapping(pinned[t], t);
+  gatherProg.add(program::Copy(gathered.reshape({numTiles, perTile, GF}), pinned));
+
+  // --- per-tile project + blend ---
+  auto projectCs = graph.addComputeSet("g_project");
+  auto blendCs   = graph.addComputeSet("g_blend");
+
+  for (unsigned t = 0; t < numTiles; ++t) {
+    if (tmFb[t].empty()) continue;  // tile holds no framebuffer region
+
+    auto localMv  = graph.clone(mvMaster,  "g_mv_"  + std::to_string(t));
+    auto localMp  = graph.clone(mpMaster,  "g_mp_"  + std::to_string(t));
+    auto localFxy = graph.clone(fxyMaster, "g_fxyt_" + std::to_string(t));
+    graph.setTileMapping(localMv, t);
+    graph.setTileMapping(localMp, t);
+    graph.setTileMapping(localFxy, t);
+    broadcastMvp.add(program::Copy(mvMaster, localMv));
+    broadcastMvp.add(program::Copy(mpMaster, localMp));
+    broadcastMvp.add(program::Copy(fxyMaster, localFxy));
+
+    auto gaus2D = graph.addVariable(FLOAT, {perTile * sizeof(Gaussian2D)}, "g_gaus2D_" + std::to_string(t));
+    auto idxs   = graph.addVariable(INT, {perTile * 2}, "g_idx_" + std::to_string(t));
+    auto splat  = graph.addVariable(UNSIGNED_INT, {1}, "g_splat_" + std::to_string(t));
+    auto tid    = graph.addConstant<int>(INT, {1}, {int(t)});
+    graph.setTileMapping(gaus2D, t);
+    graph.setTileMapping(idxs, t);
+    graph.setTileMapping(splat, t);
+    graph.setTileMapping(tid, t);
+
+    auto fbSlice = paddedFramebuffer.slice(tmFb[t].front());
+
+    auto gp = graph.addVertex(projectCs, "GatherProjectVertex");
+    graph.setTileMapping(gp, t);
+    graph.connect(gp["modelView"], localMv);
+    graph.connect(gp["projection"], localMp);
+    graph.connect(gp["tile_id"], tid);
+    graph.connect(gp["fxy"], localFxy);
+    graph.connect(gp["numGathered"], counts.slice(t, t + 1));
+    graph.connect(gp["gathered"], pinned[t].flatten());
+    graph.connect(gp["indices"], idxs);
+    graph.connect(gp["gaus2D"], gaus2D);
+    graph.connect(gp["splatted"], splat);
+
+    auto bv = graph.addVertex(blendCs, "BlendVertex");
+    graph.setTileMapping(bv, t);
+    graph.connect(bv["gaus2D"], gaus2D);
+    graph.connect(bv["splatted"], splat);
+    graph.connect(bv["tile_id"], tid);
+    graph.connect(bv["localFb"], fbSlice);
+  }
+
+  program::Sequence frame;
+  frame.add(broadcastMvp);
+  frame.add(gatherProg);
+  frame.add(program::Execute(projectCs));
+  frame.add(program::Execute(blendCs));
+
+  getPrograms().add("gather_frame", frame);
+}
+
+void IpuSplatter::executeGather(poplar::Engine& engine, const poplar::Device& device) {
+  const unsigned perTile  = gatherPerTile;
+  constexpr unsigned GF   = sizeof(Gaussian3D) / sizeof(float);
+
+  if (!gatherInitialised) {
+    gatherInitialised = true;
+    enginePtr = &engine;
+    // Tightly-pack the Gaussian table (15 real floats each) and upload once.
+    gTableHost.resize((size_t)gaussiansHost.size() * GF);
+    for (size_t j = 0; j < gaussiansHost.size(); ++j) {
+      std::memcpy(&gTableHost[j * GF], &gaussiansHost[j], sizeof(Gaussian3D));
+    }
+    engine.writeTensor("g_table_h", gTableHost.data(), gTableHost.data() + gTableHost.size());
+  }
+
+  // Host discovery for the current view.
+  GatherAssignment a = computeGatherOffsets(gaussiansHost, currentView, currentProj,
+                                            currentFov, perTile);
+
+  using clk = std::chrono::steady_clock;
+  auto t0 = clk::now();
+  // Stream MVP + offsets/counts, then run the gather frame.
+  engine.writeTensor("g_mv_h",  hostModelView.data(),  hostModelView.data()  + hostModelView.size());
+  engine.writeTensor("g_mp_h",  hostProjection.data(), hostProjection.data() + hostProjection.size());
+  engine.writeTensor("g_fxy_h", fxyHost.data(),        fxyHost.data()        + fxyHost.size());
+  engine.writeTensor("g_offsets_h", a.offsets.data(), a.offsets.data() + a.offsets.size());
+  engine.writeTensor("g_counts_h",  a.counts.data(),  a.counts.data()  + a.counts.size());
+
+  getPrograms().run(engine, "gather_frame");
+
+  engine.readTensor("g_fb_h", frameBuffer.data(), frameBuffer.data() + frameBuffer.size());
+  auto t1 = clk::now();
+  lastTiming.compute_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
 } // end of namespace splat

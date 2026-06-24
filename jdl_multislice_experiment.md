@@ -109,11 +109,26 @@ assignment on the host (already done for CPU mode) and streaming the offsets
 down — a clean, switchable proof of the speedup + flicker removal, with
 on-chip discovery left as the hard follow-up.
 
-## Stage 2 — renderer integration (only if Stage 1 is green)
-Behind a runtime flag `--gather-mode news|multislice` (default `news`, so the
-working renderer is untouched). Replace `broadcastPoints` + the routing half of
-`RouteVertex` with: project locally → exchange compact metadata → multiSlice
-the needed structs → sort → blend.
+## Stage 2 — renderer integration (IN PROGRESS)
+Behind `--gather-mode news|multislice` (default `news`, NEWS path bit-identical).
+Host-assisted discovery: project + tile-assign on the host, stream offsets/counts
+down, device gathers → pins → projects → blends.
+
+Pieces (branch jdl-experiment):
+- `include/splat/gather_discovery.hpp` — `computeGatherOffsets()` host discovery
+  (smoke-tested: 2000 gaussians → 12k assignments over 1439 tiles, OK).
+- `codelets.cpp` `GatherProjectVertex` — project + sort gathered Gaussians
+  (projectAndRoute minus routing); writes gaus2D like RouteVertex so BlendVertex
+  is unchanged.
+- `ipu_rasteriser.cpp` `buildGatherPath()` / `executeGather()` — sliceable table,
+  per-frame offsets/counts streams, multiSlice→pin→project→blend, host readback.
+- `splat.cpp` `--gather-mode` flag.
+
+Run: `./build/src/main/splat --input scene.ply --device ipu --gather-mode multislice --ui-port 5000`
+Compare frame time + flicker against `--gather-mode news` at the same pose.
+
+TODO after it renders: depth-priority on per-tile overflow (keep nearest perTile);
+measure host discovery cost; consider reusing offsets/counts host buffers.
 
 ---
 

@@ -88,7 +88,11 @@ void addOptions(boost::program_options::options_description& desc) {
    "per-frame host-device barrier for higher throughput.")
   ("orbit", po::value<float>()->default_value(0.f),
    "Auto-orbit: rotate yaw by this many degrees per frame (e.g. --orbit 1.0 "
-   "for a slow turntable). Overrides client yaw control.");
+   "for a slow turntable). Overrides client yaw control.")
+  ("gather-mode", po::value<std::string>()->default_value("news"),
+   "Render path: 'news' (on-chip Manhattan routing, default) or 'multislice' "
+   "(host-assisted discovery + popops::multiSlice gather; faster, flicker-free, "
+   "discovery on host). Experimental — branch jdl-experiment.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -220,6 +224,11 @@ int main(int argc, char** argv) {
 
 
   auto ipuSplatter = createIpuBuilder(gsns, fb, args["no-amp"].as<bool>());
+  const bool useGather = args["gather-mode"].as<std::string>() == "multislice";
+  if (useGather) {
+    ipu_utils::logger()->info("Render path: multiSlice gather (host discovery)");
+  }
+  ipuSplatter->setGatherMode(useGather);
   ipu_utils::GraphManager gm;
   gm.compileOrLoad(*ipuSplatter);
 

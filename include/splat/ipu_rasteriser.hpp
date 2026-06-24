@@ -65,9 +65,19 @@ public:
   void stopDeviceLoop();
   bool isDeviceLoopRunning() const { return deviceLoopRunning.load(); }
 
+  // Stage 2 (branch jdl-experiment): select the multiSlice gather render path
+  // instead of NEWS routing. Must be called BEFORE the graph is built
+  // (i.e. before GraphManager::compileOrLoad). Default off -> NEWS, untouched.
+  void setGatherMode(bool on) { gatherMode = on; }
+
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
   void execute(poplar::Engine& engine, const poplar::Device& device) override;
+
+  // Gather path (host-assisted discovery + popops::multiSlice). Builds an
+  // entirely separate graph so the NEWS path is unaffected.
+  void buildGatherPath(poplar::Graph& graph, const poplar::Target& target);
+  void executeGather(poplar::Engine& engine, const poplar::Device& device);
 
   ipu_utils::StreamableTensor modelView;
   ipu_utils::StreamableTensor projection;
@@ -96,6 +106,18 @@ private:
   std::atomic<bool> deviceLoopRunning{false};
   std::thread deviceThread;
   PhaseTiming lastTiming;
+
+  // ---- Stage 2 gather-path state ----
+  bool gatherMode = false;
+  unsigned gatherPerTile = 400;        // device lookups per tile (== NEWS numPoints)
+  bool gatherInitialised = false;
+  std::vector<Gaussian3D> gaussiansHost;  // kept for per-frame host discovery
+  glm::mat4 currentView{1.0f};            // last view passed to updateModelView
+  glm::mat4 currentProj{1.0f};            // last projection passed to updateProjection
+  float currentFov = 0.5f;                // last half-FOV (radians) from updateFocalLengths
+  std::vector<float> gTableHost;          // tightly-packed Gaussian table (15 floats each)
+  std::vector<unsigned> gOffsetsHost;     // per-frame offsets (numTiles*perTile)
+  std::vector<unsigned> gCountsHost;      // per-frame counts (numTiles)
 };
 
 } // end of namespace splat
