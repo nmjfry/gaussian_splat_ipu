@@ -720,29 +720,32 @@ void IpuSplatter::executeGather(poplar::Engine& engine, const poplar::Device& de
                                             currentFov, perTile);
   auto td1 = clk::now();
 
-  // Stream MVP + offsets/counts, then run the gather frame.
+  // Stream MVP + offsets/counts ...
   engine.writeTensor("g_mv_h",  hostModelView.data(),  hostModelView.data()  + hostModelView.size());
   engine.writeTensor("g_mp_h",  hostProjection.data(), hostProjection.data() + hostProjection.size());
   engine.writeTensor("g_fxy_h", fxyHost.data(),        fxyHost.data()        + fxyHost.size());
   engine.writeTensor("g_offsets_h", a.offsets.data(), a.offsets.data() + a.offsets.size());
   engine.writeTensor("g_counts_h",  a.counts.data(),  a.counts.data()  + a.counts.size());
+  auto td1b = clk::now();
+  // ... then run the gather frame (multiSlice + pin + project + blend).
   getPrograms().run(engine, "gather_frame");
   auto td2 = clk::now();
 
   engine.readTensor("g_fb_h", frameBuffer.data(), frameBuffer.data() + frameBuffer.size());
   auto td3 = clk::now();
 
-  const double disc_ms = std::chrono::duration<double, std::milli>(td1 - td0).count();
-  const double dev_ms  = std::chrono::duration<double, std::milli>(td2 - td1).count();
-  const double rb_ms   = std::chrono::duration<double, std::milli>(td3 - td2).count();
-  lastTiming.compute_ms = disc_ms + dev_ms + rb_ms;
+  const double disc_ms   = std::chrono::duration<double, std::milli>(td1 - td0).count();
+  const double stream_ms = std::chrono::duration<double, std::milli>(td1b - td1).count();
+  const double run_ms    = std::chrono::duration<double, std::milli>(td2 - td1b).count();
+  const double rb_ms     = std::chrono::duration<double, std::milli>(td3 - td2).count();
+  lastTiming.compute_ms = disc_ms + stream_ms + run_ms + rb_ms;
 
   static unsigned frame = 0;
   if ((frame++ % 30u) == 0u) {
     ipu_utils::logger()->info(
-        "gather: discovery {:.1f}ms  device+stream {:.1f}ms  readback {:.1f}ms  "
+        "gather: discovery {:.1f}ms  stream {:.1f}ms  run {:.1f}ms  readback {:.1f}ms  "
         "total {:.1f}ms (overflow drops {})",
-        disc_ms, dev_ms, rb_ms, lastTiming.compute_ms, a.overflowDrops);
+        disc_ms, stream_ms, run_ms, rb_ms, lastTiming.compute_ms, a.overflowDrops);
   }
 }
 
