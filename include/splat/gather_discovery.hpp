@@ -68,13 +68,25 @@ inline GatherAssignment computeGatherOffsets(std::vector<Gaussian3D>& gaussians,
   out.offsets.assign((size_t)numTiles * perTile, 0u);
   out.counts.assign(numTiles, 0u);
 
-  for (unsigned gi = 0; gi < gaussians.size(); ++gi) {
+  // Parallelised over Gaussians. Each (tile, Gaussian) assignment grabs a slot
+  // in counts[t] with an atomic capture, so different threads write disjoint
+  // offset entries (no data race). counts[t] may overshoot perTile under
+  // saturation; it is clamped afterwards. Compiles + runs serially when OpenMP
+  // is off (the pragmas are simply ignored). NOTE: under threads the order of
+  // assignment within a saturated tile is non-deterministic, so *which*
+  // Gaussians are dropped at the cap can vary frame-to-frame; the device sorts
+  // by depth regardless, so only saturated tiles are affected. See the
+  // depth-priority TODO below.
+  unsigned culled = 0;
+  unsigned overflow = 0;
+  const int n = (int)gaussians.size();
+  #pragma omp parallel for schedule(static) reduction(+ : culled, overflow)
+  for (int gi = 0; gi < n; ++gi) {
     Gaussian3D& g = gaussians[gi];
     if (g.gid <= 0.f) { continue; }  // padding slot, never a real Gaussian
 
     const glm::vec4 clip = mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, 1.0f);
-    // Near-cull on the same value the codelet uses for g2D.z (clipSpace.z):
-    if (clip.z <= 0.2f) { out.culled++; continue; }
+    if (clip.z <= 0.2f) { ++culled; continue; }  // near-cull (== codelet g2D.z)
 
     const glm::vec2 projMean = vp.clipSpaceToViewport(clip);
     const ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tan_fovx, tan_fovy,
@@ -82,7 +94,7 @@ inline GatherAssignment computeGatherOffsets(std::vector<Gaussian3D>& gaussians,
     const ivec2 mean2D = { projMean.x, projMean.y };
     const Bounds2f bb = Gaussian2D::BoundingBoxFromCov(mean2D, cov2D);
 
-    if (bb.diagonal().length() >= guardMaxDiag) { out.culled++; continue; }  // guard band
+    if (bb.diagonal().length() >= guardMaxDiag) { ++culled; continue; }  // guard band
 
     int minCol = (int)std::floor(bb.min.x / IPU_TILEWIDTH);
     int maxCol = (int)std::floor(bb.max.x / IPU_TILEWIDTH);
@@ -92,24 +104,31 @@ inline GatherAssignment computeGatherOffsets(std::vector<Gaussian3D>& gaussians,
     if (minRow < 0) minRow = 0;
     if (maxCol >= (int)across) maxCol = (int)across - 1;
     if (maxRow >= (int)down)   maxRow = (int)down - 1;
-    if (maxCol < minCol || maxRow < minRow) { out.culled++; continue; }  // fully offscreen
+    if (maxCol < minCol || maxRow < minRow) { ++culled; continue; }  // fully offscreen
 
     for (int r = minRow; r <= maxRow; ++r) {
       for (int c = minCol; c <= maxCol; ++c) {
         const unsigned t = (unsigned)r * across + (unsigned)c;
-        unsigned& cnt = out.counts[t];
-        if (cnt < perTile) {
-          out.offsets[(size_t)t * perTile + cnt] = gi;
-          ++cnt;
+        unsigned slot;
+        #pragma omp atomic capture
+        { slot = out.counts[t]; out.counts[t] += 1u; }
+        if (slot < perTile) {
+          out.offsets[(size_t)t * perTile + slot] = (unsigned)gi;
         } else {
-          // TODO(stage2): when a tile saturates, keep the perTile NEAREST by
-          // clip.z instead of first-come, so dense tiles drop far Gaussians
-          // (which the front-to-back blend would early-out on anyway).
-          ++out.overflowDrops;
+          // TODO(stage2): keep the perTile NEAREST by clip.z instead of
+          // first-come, so dense tiles drop far Gaussians (the front-to-back
+          // blend early-outs on those anyway) — and make drops deterministic.
+          ++overflow;
         }
       }
     }
   }
+
+  for (unsigned t = 0; t < numTiles; ++t) {
+    if (out.counts[t] > perTile) out.counts[t] = perTile;  // clamp overshoot
+  }
+  out.culled = culled;
+  out.overflowDrops = overflow;
   return out;
 }
 

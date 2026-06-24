@@ -712,24 +712,38 @@ void IpuSplatter::executeGather(poplar::Engine& engine, const poplar::Device& de
     engine.writeTensor("g_table_h", gTableHost.data(), gTableHost.data() + gTableHost.size());
   }
 
+  using clk = std::chrono::steady_clock;
+
   // Host discovery for the current view.
+  auto td0 = clk::now();
   GatherAssignment a = computeGatherOffsets(gaussiansHost, currentView, currentProj,
                                             currentFov, perTile);
+  auto td1 = clk::now();
 
-  using clk = std::chrono::steady_clock;
-  auto t0 = clk::now();
   // Stream MVP + offsets/counts, then run the gather frame.
   engine.writeTensor("g_mv_h",  hostModelView.data(),  hostModelView.data()  + hostModelView.size());
   engine.writeTensor("g_mp_h",  hostProjection.data(), hostProjection.data() + hostProjection.size());
   engine.writeTensor("g_fxy_h", fxyHost.data(),        fxyHost.data()        + fxyHost.size());
   engine.writeTensor("g_offsets_h", a.offsets.data(), a.offsets.data() + a.offsets.size());
   engine.writeTensor("g_counts_h",  a.counts.data(),  a.counts.data()  + a.counts.size());
-
   getPrograms().run(engine, "gather_frame");
+  auto td2 = clk::now();
 
   engine.readTensor("g_fb_h", frameBuffer.data(), frameBuffer.data() + frameBuffer.size());
-  auto t1 = clk::now();
-  lastTiming.compute_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  auto td3 = clk::now();
+
+  const double disc_ms = std::chrono::duration<double, std::milli>(td1 - td0).count();
+  const double dev_ms  = std::chrono::duration<double, std::milli>(td2 - td1).count();
+  const double rb_ms   = std::chrono::duration<double, std::milli>(td3 - td2).count();
+  lastTiming.compute_ms = disc_ms + dev_ms + rb_ms;
+
+  static unsigned frame = 0;
+  if ((frame++ % 30u) == 0u) {
+    ipu_utils::logger()->info(
+        "gather: discovery {:.1f}ms  device+stream {:.1f}ms  readback {:.1f}ms  "
+        "total {:.1f}ms (overflow drops {})",
+        disc_ms, dev_ms, rb_ms, lastTiming.compute_ms, a.overflowDrops);
+  }
 }
 
 } // end of namespace splat
