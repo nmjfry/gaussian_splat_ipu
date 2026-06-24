@@ -44,3 +44,9 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/src/splat)
 # Executables:
 add_subdirectory(${PROJECT_SOURCE_DIR}/tests)
 add_subdirectory(${PROJECT_SOURCE_DIR}/src/main)
+
+# Experimental (branch jdl-experiment): standalone dynamic-lookup microbenchmark.
+# Self-contained — links only Poplar/popops and does not touch the renderer.
+# See jdl_multislice_experiment.md.
+add_executable(multislice_bench ${PROJECT_SOURCE_DIR}/tools/multislice_bench.cpp)
+target_link_libraries(multislice_bench ${POPLAR_LINK_LIBRARIES})
