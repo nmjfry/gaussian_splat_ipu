@@ -457,6 +457,57 @@ int main(int argc, char** argv) {
     // Initialize: first execute connects streams and writes vertices
     gm.execute(*ipuSplatter);
 
+    // ---- multiSlice gather benchmark (Stage 2) ----
+    // The gather path doesn't build the NEWS single_route/blend/exchange
+    // programs, so it gets its own loop: one gm.execute (= executeGather) per
+    // pose, recording the host discovery / stream / device run / readback split.
+    if (useGather) {
+      if (playbackPoses.empty()) {
+        ipu_utils::logger()->error("--gather-mode multislice benchmark needs --bench-static or --play-path");
+        return EXIT_FAILURE;
+      }
+      const size_t numPoses = playbackPoses.size() / 16;
+      const size_t totalFrames = static_cast<size_t>(benchmarkSubsteps) * numPoses;
+
+      FILE* csv = fopen("benchmark_profile.csv", "w");
+      fprintf(csv, "frame,pose_idx,discovery_ms,stream_ms,run_ms,readback_ms,total_ms,assigned\n");
+      printf("Gather benchmark: %zu frames (%d x %zu poses)\n", totalFrames, benchmarkSubsteps, numPoses);
+
+      using clk = std::chrono::steady_clock;
+      auto bench_start = clk::now();
+      for (size_t f = 0; f < totalFrames; ++f) {
+        const float* vm = &playbackPoses[16 * (f % numPoses)];
+        glm::mat4 V_colmap(0.f);
+        for (int c = 0; c < 4; ++c)
+          for (int r = 0; r < 4; ++r)
+            V_colmap[c][r] = vm[c * 4 + r];
+        ipuSplatter->updateModelView(V_colmap);
+        ipuSplatter->updateProjection(projection);
+        ipuSplatter->updateFocalLengths(state.fov, 0.f);
+
+        gm.execute(*ipuSplatter);  // executeGather: discovery + stream + run + readback
+        auto gt = ipuSplatter->getLastGatherTiming();
+        fprintf(csv, "%zu,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%u\n",
+                f, f % numPoses, gt.discovery_ms, gt.stream_ms, gt.run_ms,
+                gt.readback_ms, gt.total_ms(), gt.assigned);
+        if (f % 60 == 0 || f + 1 == totalFrames) {
+          printf("  frame %5zu  disc %.1f  stream %.1f  run %.1f  rb %.1f  total %.1f ms  assigned %u\n",
+                 f + 1, gt.discovery_ms, gt.stream_ms, gt.run_ms, gt.readback_ms,
+                 gt.total_ms(), gt.assigned);
+        }
+      }
+      auto bench_end = clk::now();
+      double bench_secs = std::chrono::duration<double>(bench_end - bench_start).count();
+      fclose(csv);
+
+      ipuSplatter->getFrameBuffer(*imagePtr);
+      cv::imwrite("benchmark_last_frame.png", *imagePtr);
+      printf("Gather benchmark complete: %zu frames in %.2fs (%.1f FPS).\n",
+             totalFrames, bench_secs, totalFrames / bench_secs);
+      printf("Per-frame timing saved to benchmark_profile.csv\n");
+      return EXIT_SUCCESS;
+    }
+
     // Trajectory-driven benchmark: iterate `benchmarkSubsteps` full loops
     // through the loaded trajectory, one render per pose.
     if (!playbackPoses.empty()) {

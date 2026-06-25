@@ -740,6 +740,10 @@ void IpuSplatter::executeGather(poplar::Engine& engine, const poplar::Device& de
   const double rb_ms     = std::chrono::duration<double, std::milli>(td3 - td2).count();
   lastTiming.compute_ms = disc_ms + stream_ms + run_ms + rb_ms;
 
+  unsigned assigned = 0;
+  for (unsigned c : a.counts) assigned += c;
+  lastGatherTiming = GatherTiming{disc_ms, stream_ms, run_ms, rb_ms, assigned};
+
   static unsigned frame = 0;
   if ((frame++ % 30u) == 0u) {
     ipu_utils::logger()->info(

@@ -24,6 +24,18 @@ struct PhaseTiming {
   double total_ms() const { return mvp_ms + route_ms + blend_ms + exchange_ms + readback_ms; }
 };
 
+// Per-frame timing for the multiSlice gather path (Stage 2). `run_ms` is the
+// combined device program (broadcast + gather + project + blend) — the same
+// single engine.run the interactive path uses, so the total is realistic.
+struct GatherTiming {
+  double discovery_ms = 0;  // host: computeGatherOffsets
+  double stream_ms = 0;     // host->device: mvp + offsets + counts
+  double run_ms = 0;        // device: gather_frame (gather + project + blend)
+  double readback_ms = 0;   // device->host: framebuffer
+  unsigned assigned = 0;    // total (tile,Gaussian) assignments this frame
+  double total_ms() const { return discovery_ms + stream_ms + run_ms + readback_ms; }
+};
+
 // Fwd decls:
 class Point3f;
 typedef std::vector<Point3f> Points;
@@ -45,6 +57,7 @@ public:
 
   void setProfilingMode(bool enabled) { profilingMode = enabled; }
   PhaseTiming getLastPhaseTiming() const { return lastTiming; }
+  GatherTiming getLastGatherTiming() const { return lastGatherTiming; }
 
   void broadcastMVP();
   PhaseTiming runSingleSubstep();
@@ -124,6 +137,7 @@ private:
   std::vector<float> gTableHost;          // tightly-packed Gaussian table (15 floats each)
   std::vector<unsigned> gOffsetsHost;     // per-frame offsets (numTiles*perTile)
   std::vector<unsigned> gCountsHost;      // per-frame counts (numTiles)
+  GatherTiming lastGatherTiming;          // populated each executeGather frame
 };
 
 } // end of namespace splat
