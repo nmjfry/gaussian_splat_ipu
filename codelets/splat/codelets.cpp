@@ -513,6 +513,100 @@ public:
 };
 
 
+// On-device discovery for the gather path. Each tile projects a shard of the
+// full Gaussian set and outputs (global_index, dest_tile_id, depth) triples
+// for every visible (tile, Gaussian) assignment. The host reads these back,
+// bins them into per-tile offset arrays, and feeds them to multiSlice.
+// Replaces the 29ms host-side computeGatherOffsets with ~1440-way parallel
+// projection on the IPU.
+class DiscoveryVertex : public poplar::Vertex {
+public:
+  poplar::Input<poplar::Vector<float>> modelView;
+  poplar::Input<poplar::Vector<float>> projection;
+  poplar::Input<poplar::Vector<float>> fxy;
+  poplar::Input<poplar::Vector<float>> gaussianShard;   // this tile's slice of the table
+  poplar::Input<poplar::Vector<unsigned>> shardOffset;   // global index of first Gaussian
+  poplar::Input<poplar::Vector<unsigned>> shardCount;    // number of valid Gaussians in shard
+  // Each assignment is 3 unsigned: (global_gaussian_index, dest_tile, depth_bits).
+  // depth_bits = float-as-uint for deterministic nearest-first selection on host.
+  poplar::Output<poplar::Vector<unsigned>> assignments;
+  poplar::Output<poplar::Vector<unsigned>> numAssignments;
+
+  bool compute() {
+    const TiledFramebuffer tfb(IPU_TILEWIDTH, IPU_TILEHEIGHT);
+    const splat::Viewport vp(0.0f, 0.0f, IMWIDTH, IMHEIGHT);
+    const unsigned across = tfb.numTilesAcross;
+    const unsigned down   = tfb.numTilesDown;
+    constexpr float clipSize = 12.0f;
+
+    const auto viewmatrix = glm::transpose(glm::make_mat4(&modelView[0]));
+    const auto projmatrix = glm::transpose(glm::make_mat4(&projection[0]));
+    const float tan_fovy = glm::tan(fxy[0]);
+    const float tan_fovx = tan_fovy * (float(IMWIDTH) / float(IMHEIGHT));
+    const float focal_y = float(IMHEIGHT) / (2.f * tan_fovy);
+    const float focal_x = float(IMWIDTH)  / (2.f * tan_fovx);
+    const glm::mat4 mvp = projmatrix * viewmatrix;
+
+    const Bounds2f tb0 = tfb.getTileBounds(0);
+    const float guardMaxDiag = tb0.diagonal().length() * clipSize;
+
+    constexpr unsigned GF = sizeof(Gaussian3D) / sizeof(float);
+    const unsigned n = shardCount[0];
+    const unsigned base = shardOffset[0];
+    const unsigned maxOut = assignments.size() / 3u;
+    unsigned count = 0;
+
+    for (unsigned k = 0; k < n; ++k) {
+      Gaussian3D g;
+      std::memcpy(&g, &gaussianShard[k * GF], sizeof(g));
+      if (g.gid <= 0.f) continue;
+
+      auto clipSpace = mvp * glm::vec4(g.mean.x, g.mean.y, g.mean.z, 1.0f);
+      if (clipSpace.z <= 0.2f) continue;
+
+      auto projMean = vp.clipSpaceToViewport(clipSpace);
+      if (projMean.x < -guardMaxDiag || projMean.x > IMWIDTH  + guardMaxDiag ||
+          projMean.y < -guardMaxDiag || projMean.y > IMHEIGHT + guardMaxDiag)
+        continue;
+
+      ivec3 cov2D = g.ComputeCov2D(projmatrix, viewmatrix, tan_fovx, tan_fovy,
+                                    focal_x, focal_y);
+      ivec2 mean2D = {projMean.x, projMean.y};
+      auto bb = Gaussian2D::BoundingBoxFromCov(mean2D, cov2D);
+      if (bb.diagonal().length() >= guardMaxDiag) continue;
+
+      int minCol = (int)floor(bb.min.x / IPU_TILEWIDTH);
+      int maxCol = (int)floor(bb.max.x / IPU_TILEWIDTH);
+      int minRow = (int)floor(bb.min.y / IPU_TILEHEIGHT);
+      int maxRow = (int)floor(bb.max.y / IPU_TILEHEIGHT);
+      if (minCol < 0) minCol = 0;
+      if (minRow < 0) minRow = 0;
+      if (maxCol >= (int)across) maxCol = (int)across - 1;
+      if (maxRow >= (int)down)   maxRow = (int)down - 1;
+      if (maxCol < minCol || maxRow < minRow) continue;
+
+      unsigned depthBits;
+      float z = clipSpace.z;
+      std::memcpy(&depthBits, &z, sizeof(unsigned));
+
+      for (int r = minRow; r <= maxRow; ++r) {
+        for (int c = minCol; c <= maxCol; ++c) {
+          if (count >= maxOut) goto done;
+          unsigned t = (unsigned)r * across + (unsigned)c;
+          assignments[count * 3 + 0] = base + k;
+          assignments[count * 3 + 1] = t;
+          assignments[count * 3 + 2] = depthBits;
+          count++;
+        }
+      }
+    }
+    done:
+    numAssignments[0] = count;
+    return true;
+  }
+};
+
+
 // Single-worker vertex for the multiSlice gather render path (branch
 // jdl-experiment, Stage 2). The host has already done discovery + routing:
 // `gathered` holds exactly this tile's Gaussians (those whose 3-sigma bbox

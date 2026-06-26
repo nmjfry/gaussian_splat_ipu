@@ -688,68 +688,282 @@ void IpuSplatter::buildGatherPath(poplar::Graph& graph, const poplar::Target& ta
     graph.connect(bv["localFb"], fbSlice);
   }
 
-  program::Sequence frame;
-  frame.add(broadcastMvp);
-  frame.add(gatherProg);
-  frame.add(program::Execute(projectCs));
-  frame.add(program::Execute(blendCs));
+  // --- On-device discovery (optional: replaces host computeGatherOffsets) ---
+  // Must be wired up BEFORE registering broadcastMvp, since discovery adds
+  // its own MVP copies to the broadcast sequence.
+  if (deviceDiscovery) {
+    // Shard the Gaussian table evenly across tiles for parallel projection.
+    // Each tile gets ceil(numGaussians/numTiles) Gaussians. A visible Gaussian
+    // typically overlaps 1-4 screen tiles, so budget ~4x assignments per Gaussian
+    // in the shard as the output buffer.
+    const unsigned perShard = (numGaussians + numTiles - 1) / numTiles;
+    const unsigned assignCap = perShard * 4;  // max output triples per tile
+    discoveryAssignCap = assignCap;
+    discoveryNumTiles = numTiles;
 
-  getPrograms().add("gather_frame", frame);
+    ipu_utils::logger()->info("Device discovery: {} gaussians / {} tiles = {}/tile, "
+                              "assignCap {}", numGaussians, numTiles, perShard, assignCap);
+
+    // Shard tensor: each tile gets perShard * GF floats from the table.
+    // Pad the last tile's shard to the same size (shardCount tells the codelet
+    // how many are valid).
+    Tensor discTable = graph.addVariable(FLOAT, {(size_t)numTiles * perShard * GF}, "d_table");
+    for (unsigned t = 0; t < numTiles; ++t) {
+      auto slice = discTable.slice((size_t)t * perShard * GF, (size_t)(t + 1) * perShard * GF);
+      graph.setTileMapping(slice, t);
+    }
+    graph.createHostWrite("d_table_h", discTable);
+
+    // Per-tile metadata: shard offset and count.
+    Tensor discOffsets = graph.addVariable(UNSIGNED_INT, {numTiles}, "d_shard_offsets");
+    Tensor discCounts  = graph.addVariable(UNSIGNED_INT, {numTiles}, "d_shard_counts");
+    for (unsigned t = 0; t < numTiles; ++t) {
+      graph.setTileMapping(discOffsets[t], t);
+      graph.setTileMapping(discCounts[t], t);
+    }
+    graph.createHostWrite("d_shard_offsets_h", discOffsets);
+    graph.createHostWrite("d_shard_counts_h", discCounts);
+
+    // Output: per-tile assignment triples + count.
+    Tensor discAssign = graph.addVariable(UNSIGNED_INT,
+        {(size_t)numTiles * assignCap * 3}, "d_assignments");
+    Tensor discAssignCounts = graph.addVariable(UNSIGNED_INT, {numTiles}, "d_assign_counts");
+    for (unsigned t = 0; t < numTiles; ++t) {
+      auto aSlice = discAssign.slice((size_t)t * assignCap * 3, (size_t)(t + 1) * assignCap * 3);
+      graph.setTileMapping(aSlice, t);
+      graph.setTileMapping(discAssignCounts[t], t);
+    }
+    graph.createHostRead("d_assignments_h", discAssign);
+    graph.createHostRead("d_assign_counts_h", discAssignCounts);
+
+    // Wire up DiscoveryVertex on each tile.
+    auto discoveryCs = graph.addComputeSet("g_discovery");
+    for (unsigned t = 0; t < numTiles; ++t) {
+      if (tmFb[t].empty()) continue;
+
+      // Reuse the broadcast MVP copies already on each tile.
+      auto localMvName  = "g_mv_"  + std::to_string(t);
+      auto localMpName  = "g_mp_"  + std::to_string(t);
+      auto localFxyName = "g_fxyt_" + std::to_string(t);
+
+      auto shardSlice = discTable.slice((size_t)t * perShard * GF, (size_t)(t + 1) * perShard * GF);
+      auto assignSlice = discAssign.slice((size_t)t * assignCap * 3, (size_t)(t + 1) * assignCap * 3);
+
+      auto dv = graph.addVertex(discoveryCs, "DiscoveryVertex");
+      graph.setTileMapping(dv, t);
+      // MVP tensors were already cloned and mapped to tile t in the loop above.
+      // Look them up by getting the tile mapping — but they're local variables
+      // from the loop. We need to connect to the same tensors. The simplest
+      // approach: store them during the per-tile loop above and reuse here.
+      // Since we can't do that without restructuring, create discovery-specific
+      // MVP copies from the masters (cheap — just 34 floats per tile).
+      auto dMv  = graph.clone(mvMaster,  "d_mv_"  + std::to_string(t));
+      auto dMp  = graph.clone(mpMaster,  "d_mp_"  + std::to_string(t));
+      auto dFxy = graph.clone(fxyMaster, "d_fxy_" + std::to_string(t));
+      graph.setTileMapping(dMv, t);
+      graph.setTileMapping(dMp, t);
+      graph.setTileMapping(dFxy, t);
+      broadcastMvp.add(program::Copy(mvMaster, dMv));
+      broadcastMvp.add(program::Copy(mpMaster, dMp));
+      broadcastMvp.add(program::Copy(fxyMaster, dFxy));
+
+      graph.connect(dv["modelView"], dMv);
+      graph.connect(dv["projection"], dMp);
+      graph.connect(dv["fxy"], dFxy);
+      graph.connect(dv["gaussianShard"], shardSlice);
+      graph.connect(dv["shardOffset"], discOffsets.slice(t, t + 1));
+      graph.connect(dv["shardCount"], discCounts.slice(t, t + 1));
+      graph.connect(dv["assignments"], assignSlice);
+      graph.connect(dv["numAssignments"], discAssignCounts.slice(t, t + 1));
+    }
+
+    getPrograms().add("gather_discovery", program::Execute(discoveryCs));
+  }
+
+  // Register programs after discovery block so broadcastMvp includes all copies.
+  getPrograms().add("gather_mvp", broadcastMvp);
+  getPrograms().add("gather_slice", gatherProg);
+  getPrograms().add("gather_project", program::Execute(projectCs));
+  getPrograms().add("gather_blend", program::Execute(blendCs));
 }
 
 void IpuSplatter::executeGather(poplar::Engine& engine, const poplar::Device& device) {
+  const unsigned numTiles = (unsigned)fbMapping.numTiles;
   const unsigned perTile  = gatherPerTile;
   constexpr unsigned GF   = sizeof(Gaussian3D) / sizeof(float);
+  const unsigned numGaussians = (unsigned)gaussiansHost.size();
 
   if (!gatherInitialised) {
     gatherInitialised = true;
     enginePtr = &engine;
     // Tightly-pack the Gaussian table (15 real floats each) and upload once.
-    gTableHost.resize((size_t)gaussiansHost.size() * GF);
-    for (size_t j = 0; j < gaussiansHost.size(); ++j) {
+    gTableHost.resize((size_t)numGaussians * GF);
+    for (size_t j = 0; j < numGaussians; ++j) {
       std::memcpy(&gTableHost[j * GF], &gaussiansHost[j], sizeof(Gaussian3D));
     }
     engine.writeTensor("g_table_h", gTableHost.data(), gTableHost.data() + gTableHost.size());
+
+    if (deviceDiscovery) {
+      // Upload the sharded Gaussian table for discovery (once).
+      const unsigned perShard = (numGaussians + numTiles - 1) / numTiles;
+      std::vector<float> discTableBuf((size_t)numTiles * perShard * GF, 0.f);
+      std::vector<unsigned> shardOffsets(numTiles);
+      std::vector<unsigned> shardCounts(numTiles);
+      for (unsigned t = 0; t < numTiles; ++t) {
+        unsigned begin = t * perShard;
+        unsigned end = std::min(begin + perShard, numGaussians);
+        shardOffsets[t] = begin;
+        shardCounts[t] = (begin < numGaussians) ? (end - begin) : 0;
+        for (unsigned k = begin; k < end; ++k) {
+          std::memcpy(&discTableBuf[((size_t)t * perShard + (k - begin)) * GF],
+                      &gaussiansHost[k], sizeof(Gaussian3D));
+        }
+      }
+      engine.writeTensor("d_table_h", discTableBuf.data(),
+                         discTableBuf.data() + discTableBuf.size());
+      engine.writeTensor("d_shard_offsets_h", shardOffsets.data(),
+                         shardOffsets.data() + shardOffsets.size());
+      engine.writeTensor("d_shard_counts_h", shardCounts.data(),
+                         shardCounts.data() + shardCounts.size());
+
+      // Allocate readback buffers.
+      discoveryAssignHost.resize((size_t)numTiles * discoveryAssignCap * 3);
+      discoveryCountHost.resize(numTiles);
+    }
   }
 
   using clk = std::chrono::steady_clock;
-
-  // Host discovery for the current view.
   auto td0 = clk::now();
-  GatherAssignment a = computeGatherOffsets(gaussiansHost, currentView, currentProj,
-                                            currentFov, perTile);
-  auto td1 = clk::now();
 
-  // Stream MVP + offsets/counts ...
-  engine.writeTensor("g_mv_h",  hostModelView.data(),  hostModelView.data()  + hostModelView.size());
-  engine.writeTensor("g_mp_h",  hostProjection.data(), hostProjection.data() + hostProjection.size());
-  engine.writeTensor("g_fxy_h", fxyHost.data(),        fxyHost.data()        + fxyHost.size());
-  engine.writeTensor("g_offsets_h", a.offsets.data(), a.offsets.data() + a.offsets.size());
-  engine.writeTensor("g_counts_h",  a.counts.data(),  a.counts.data()  + a.counts.size());
+  double disc_ms = 0;
+  unsigned overflowDrops = 0;
+  unsigned totalAssigned = 0;
+
+  if (deviceDiscovery) {
+    // Stream MVP to device (needed before discovery runs).
+    engine.writeTensor("g_mv_h",  hostModelView.data(),  hostModelView.data()  + hostModelView.size());
+    engine.writeTensor("g_mp_h",  hostProjection.data(), hostProjection.data() + hostProjection.size());
+    engine.writeTensor("g_fxy_h", fxyHost.data(),        fxyHost.data()        + fxyHost.size());
+
+    // Broadcast MVP to all tiles (including discovery copies).
+    getPrograms().run(engine, "gather_mvp");
+
+    // Run on-device discovery: 1440-way parallel projection.
+    auto tDisc0 = clk::now();
+    getPrograms().run(engine, "gather_discovery");
+    auto tDisc1 = clk::now();
+
+    // Read back assignment triples and counts.
+    engine.readTensor("d_assignments_h", discoveryAssignHost.data(),
+                      discoveryAssignHost.data() + discoveryAssignHost.size());
+    engine.readTensor("d_assign_counts_h", discoveryCountHost.data(),
+                      discoveryCountHost.data() + discoveryCountHost.size());
+    auto tDiscRb = clk::now();
+
+    // Bin assignments into per-screen-tile offset arrays (host-side, cheap).
+    // Each assignment triple is (gaussian_index, dest_tile, depth_bits).
+    // We keep the nearest `perTile` per dest_tile, sorted by depth.
+    struct Candidate { unsigned gi; unsigned depthBits; };
+    std::vector<std::vector<Candidate>> tileCands(numTiles);
+
+    for (unsigned t = 0; t < numTiles; ++t) {
+      const unsigned cnt = discoveryCountHost[t];
+      const size_t base = (size_t)t * discoveryAssignCap * 3;
+      for (unsigned k = 0; k < cnt; ++k) {
+        unsigned gi    = discoveryAssignHost[base + k * 3 + 0];
+        unsigned dest  = discoveryAssignHost[base + k * 3 + 1];
+        unsigned depth = discoveryAssignHost[base + k * 3 + 2];
+        if (dest < numTiles) {
+          tileCands[dest].push_back({gi, depth});
+        }
+      }
+    }
+
+    // Build offset/count arrays for multiSlice (same format as host discovery).
+    gOffsetsHost.assign((size_t)numTiles * perTile, 0u);
+    gCountsHost.assign(numTiles, 0u);
+    for (unsigned dest = 0; dest < numTiles; ++dest) {
+      auto& cands = tileCands[dest];
+      if (cands.empty()) continue;
+      // Keep the nearest perTile by depth.
+      if (cands.size() > perTile) {
+        std::nth_element(cands.begin(), cands.begin() + perTile, cands.end(),
+            [](const Candidate& a, const Candidate& b) {
+              if (a.depthBits != b.depthBits) return a.depthBits < b.depthBits;
+              return a.gi < b.gi;
+            });
+        overflowDrops += (unsigned)(cands.size() - perTile);
+        cands.resize(perTile);
+      }
+      for (unsigned k = 0; k < cands.size(); ++k) {
+        gOffsetsHost[(size_t)dest * perTile + k] = cands[k].gi;
+      }
+      gCountsHost[dest] = (unsigned)cands.size();
+    }
+    auto tBin = clk::now();
+
+    for (unsigned c : gCountsHost) totalAssigned += c;
+
+    // Upload the freshly computed offsets/counts.
+    engine.writeTensor("g_offsets_h", gOffsetsHost.data(),
+                       gOffsetsHost.data() + gOffsetsHost.size());
+    engine.writeTensor("g_counts_h", gCountsHost.data(),
+                       gCountsHost.data() + gCountsHost.size());
+
+    disc_ms = std::chrono::duration<double, std::milli>(tBin - tDisc0).count();
+
+  } else {
+    // Host discovery (original path).
+    GatherAssignment a = computeGatherOffsets(gaussiansHost, currentView, currentProj,
+                                              currentFov, perTile);
+    auto td1 = clk::now();
+    disc_ms = std::chrono::duration<double, std::milli>(td1 - td0).count();
+    overflowDrops = a.overflowDrops;
+    for (unsigned c : a.counts) totalAssigned += c;
+
+    engine.writeTensor("g_mv_h",  hostModelView.data(),  hostModelView.data()  + hostModelView.size());
+    engine.writeTensor("g_mp_h",  hostProjection.data(), hostProjection.data() + hostProjection.size());
+    engine.writeTensor("g_fxy_h", fxyHost.data(),        fxyHost.data()        + fxyHost.size());
+    engine.writeTensor("g_offsets_h", a.offsets.data(), a.offsets.data() + a.offsets.size());
+    engine.writeTensor("g_counts_h",  a.counts.data(),  a.counts.data()  + a.counts.size());
+  }
+
   auto td1b = clk::now();
-  // ... then run the gather frame (multiSlice + pin + project + blend).
-  getPrograms().run(engine, "gather_frame");
-  auto td2 = clk::now();
+  double stream_ms = std::chrono::duration<double, std::milli>(td1b - td0).count() - disc_ms;
+
+  if (!deviceDiscovery) {
+    // MVP broadcast only needed here for host-discovery path (device-discovery
+    // already broadcast MVP before running the discovery codelet).
+    getPrograms().run(engine, "gather_mvp");
+  }
+  auto td_mvp = clk::now();
+  getPrograms().run(engine, "gather_slice");
+  auto td_gather = clk::now();
+  getPrograms().run(engine, "gather_project");
+  auto td_proj = clk::now();
+  getPrograms().run(engine, "gather_blend");
+  auto td_blend = clk::now();
 
   engine.readTensor("g_fb_h", frameBuffer.data(), frameBuffer.data() + frameBuffer.size());
   auto td3 = clk::now();
 
-  const double disc_ms   = std::chrono::duration<double, std::milli>(td1 - td0).count();
-  const double stream_ms = std::chrono::duration<double, std::milli>(td1b - td1).count();
-  const double run_ms    = std::chrono::duration<double, std::milli>(td2 - td1b).count();
-  const double rb_ms     = std::chrono::duration<double, std::milli>(td3 - td2).count();
-  lastTiming.compute_ms = disc_ms + stream_ms + run_ms + rb_ms;
+  const double mvp_ms     = std::chrono::duration<double, std::milli>(td_mvp - td1b).count();
+  const double gather_ms  = std::chrono::duration<double, std::milli>(td_gather - td_mvp).count();
+  const double project_ms = std::chrono::duration<double, std::milli>(td_proj - td_gather).count();
+  const double blend_ms   = std::chrono::duration<double, std::milli>(td_blend - td_proj).count();
+  const double rb_ms      = std::chrono::duration<double, std::milli>(td3 - td_blend).count();
+  lastTiming.compute_ms   = disc_ms + stream_ms + mvp_ms + gather_ms + project_ms + blend_ms + rb_ms;
 
-  unsigned assigned = 0;
-  for (unsigned c : a.counts) assigned += c;
-  lastGatherTiming = GatherTiming{disc_ms, stream_ms, run_ms, rb_ms, assigned};
+  lastGatherTiming = {disc_ms, stream_ms, mvp_ms, gather_ms, project_ms, blend_ms, rb_ms, totalAssigned};
 
   static unsigned frame = 0;
   if ((frame++ % 30u) == 0u) {
     ipu_utils::logger()->info(
-        "gather: discovery {:.1f}ms  stream {:.1f}ms  run {:.1f}ms  readback {:.1f}ms  "
-        "total {:.1f}ms (overflow drops {})",
-        disc_ms, stream_ms, run_ms, rb_ms, lastTiming.compute_ms, a.overflowDrops);
+        "gather{}: disc {:.1f}  stream {:.1f}  mvp {:.1f}  gather {:.1f}  "
+        "proj {:.1f}  blend {:.1f}  rb {:.1f}  total {:.1f}ms (drops {})",
+        deviceDiscovery ? " [device-disc]" : "",
+        disc_ms, stream_ms, mvp_ms, gather_ms, project_ms, blend_ms, rb_ms,
+        lastTiming.compute_ms, overflowDrops);
   }
 }
 

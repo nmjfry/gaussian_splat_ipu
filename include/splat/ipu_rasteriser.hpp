@@ -24,16 +24,18 @@ struct PhaseTiming {
   double total_ms() const { return mvp_ms + route_ms + blend_ms + exchange_ms + readback_ms; }
 };
 
-// Per-frame timing for the multiSlice gather path (Stage 2). `run_ms` is the
-// combined device program (broadcast + gather + project + blend) — the same
-// single engine.run the interactive path uses, so the total is realistic.
+// Per-frame timing for the multiSlice gather path (Stage 2).
 struct GatherTiming {
   double discovery_ms = 0;  // host: computeGatherOffsets
   double stream_ms = 0;     // host->device: mvp + offsets + counts
-  double run_ms = 0;        // device: gather_frame (gather + project + blend)
+  double mvp_ms = 0;        // device: broadcast MVP to tiles
+  double gather_ms = 0;     // device: multiSlice + copy to tile-local buffers
+  double project_ms = 0;    // device: GatherProjectVertex (project + cull + sort)
+  double blend_ms = 0;      // device: BlendVertex (alpha-blend)
   double readback_ms = 0;   // device->host: framebuffer
   unsigned assigned = 0;    // total (tile,Gaussian) assignments this frame
-  double total_ms() const { return discovery_ms + stream_ms + run_ms + readback_ms; }
+  double run_ms() const { return mvp_ms + gather_ms + project_ms + blend_ms; }
+  double total_ms() const { return discovery_ms + stream_ms + run_ms() + readback_ms; }
 };
 
 // Fwd decls:
@@ -89,6 +91,11 @@ public:
   // before the graph is built.
   void setGatherCap(unsigned cap) { gatherPerTile = cap; }
 
+  // Run discovery (projection + tile assignment) on the IPU instead of the
+  // host CPU. Replaces the ~29ms single-threaded host loop with 1440-way
+  // parallel projection on-device. Must be set before the graph is built.
+  void setDeviceDiscovery(bool on) { deviceDiscovery = on; }
+
 private:
   void build(poplar::Graph& graph, const poplar::Target& target) override;
   void execute(poplar::Engine& engine, const poplar::Device& device) override;
@@ -128,6 +135,7 @@ private:
 
   // ---- Stage 2 gather-path state ----
   bool gatherMode = false;
+  bool deviceDiscovery = false;        // run projection on IPU instead of host
   unsigned gatherPerTile = 400;        // device lookups per tile (== NEWS numPoints)
   bool gatherInitialised = false;
   std::vector<Gaussian3D> gaussiansHost;  // kept for per-frame host discovery
@@ -138,6 +146,12 @@ private:
   std::vector<unsigned> gOffsetsHost;     // per-frame offsets (numTiles*perTile)
   std::vector<unsigned> gCountsHost;      // per-frame counts (numTiles)
   GatherTiming lastGatherTiming;          // populated each executeGather frame
+
+  // ---- Device discovery state ----
+  unsigned discoveryAssignCap = 0;     // max assignments per tile (output buffer size / 3)
+  unsigned discoveryNumTiles = 0;      // tiles used for discovery sharding
+  std::vector<unsigned> discoveryAssignHost;  // readback: numTiles * assignCap * 3
+  std::vector<unsigned> discoveryCountHost;   // readback: numTiles (assignment counts)
 };
 
 } // end of namespace splat

@@ -95,7 +95,10 @@ void addOptions(boost::program_options::options_description& desc) {
    "discovery on host). Experimental — branch jdl-experiment.")
   ("gather-cap", po::value<int>()->default_value(400),
    "Per-tile Gaussian capacity for --gather-mode multislice. Lower = faster but "
-   "drops the farthest Gaussians on dense tiles (e.g. 200).");
+   "drops the farthest Gaussians on dense tiles (e.g. 200).")
+  ("device-discovery", po::bool_switch()->default_value(false),
+   "Run Gaussian discovery (projection + tile assignment) on the IPU instead "
+   "of the host CPU. Only applies to --gather-mode multislice.");
 }
 
 std::unique_ptr<splat::IpuSplatter> createIpuBuilder(const splat::Points& pts, splat::TiledFramebuffer& fb, bool useAMP) {
@@ -230,8 +233,11 @@ int main(int argc, char** argv) {
   const bool useGather = args["gather-mode"].as<std::string>() == "multislice";
   if (useGather) {
     const int cap = args["gather-cap"].as<int>();
-    ipu_utils::logger()->info("Render path: multiSlice gather (host discovery), cap {}", cap);
+    const bool devDisc = args["device-discovery"].as<bool>();
+    ipu_utils::logger()->info("Render path: multiSlice gather ({}discovery), cap {}",
+                              devDisc ? "device " : "host ", cap);
     ipuSplatter->setGatherCap((unsigned)cap);
+    ipuSplatter->setDeviceDiscovery(devDisc);
   }
   ipuSplatter->setGatherMode(useGather);
   ipu_utils::GraphManager gm;
@@ -470,7 +476,7 @@ int main(int argc, char** argv) {
       const size_t totalFrames = static_cast<size_t>(benchmarkSubsteps) * numPoses;
 
       FILE* csv = fopen("benchmark_profile.csv", "w");
-      fprintf(csv, "frame,pose_idx,discovery_ms,stream_ms,run_ms,readback_ms,total_ms,assigned\n");
+      fprintf(csv, "frame,pose_idx,discovery_ms,stream_ms,mvp_ms,gather_ms,project_ms,blend_ms,readback_ms,total_ms,assigned\n");
       printf("Gather benchmark: %zu frames (%d x %zu poses)\n", totalFrames, benchmarkSubsteps, numPoses);
 
       using clk = std::chrono::steady_clock;
@@ -487,12 +493,15 @@ int main(int argc, char** argv) {
 
         gm.execute(*ipuSplatter);  // executeGather: discovery + stream + run + readback
         auto gt = ipuSplatter->getLastGatherTiming();
-        fprintf(csv, "%zu,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%u\n",
-                f, f % numPoses, gt.discovery_ms, gt.stream_ms, gt.run_ms,
+        fprintf(csv, "%zu,%zu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u\n",
+                f, f % numPoses, gt.discovery_ms, gt.stream_ms, gt.mvp_ms,
+                gt.gather_ms, gt.project_ms, gt.blend_ms,
                 gt.readback_ms, gt.total_ms(), gt.assigned);
         if (f % 60 == 0 || f + 1 == totalFrames) {
-          printf("  frame %5zu  disc %.1f  stream %.1f  run %.1f  rb %.1f  total %.1f ms  assigned %u\n",
-                 f + 1, gt.discovery_ms, gt.stream_ms, gt.run_ms, gt.readback_ms,
+          printf("  frame %5zu  disc %.1f  stream %.1f  mvp %.1f  gather %.1f  "
+                 "proj %.1f  blend %.1f  rb %.1f  total %.1f ms  assigned %u\n",
+                 f + 1, gt.discovery_ms, gt.stream_ms, gt.mvp_ms, gt.gather_ms,
+                 gt.project_ms, gt.blend_ms, gt.readback_ms,
                  gt.total_ms(), gt.assigned);
         }
       }
